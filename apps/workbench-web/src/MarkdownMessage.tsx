@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { Component, memo, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -72,7 +72,9 @@ const highlightPromise = import("rehype-highlight").then((module) => {
 });
 
 function useHighlight(): RehypePlugin | null {
-  const [plugin, setPlugin] = useState<RehypePlugin | null>(loadedHighlight);
+  // A Unified plugin is itself a function, so always use lazy initialization;
+  // passing it directly to useState would make React execute it as an initializer.
+  const [plugin, setPlugin] = useState<RehypePlugin | null>(() => loadedHighlight);
   useEffect(() => { if (!plugin) void highlightPromise.then((value) => setPlugin(() => value)); }, [plugin]);
   return plugin;
 }
@@ -83,9 +85,20 @@ const MarkdownChunk = memo(function MarkdownChunk({ content }: { content: string
   return <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={highlight ? [highlight] : []} components={components}>{content}</ReactMarkdown>;
 });
 
+class MarkdownBoundary extends Component<{ content: string; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidUpdate(previous: { content: string }) {
+    if (this.state.failed && previous.content !== this.props.content) this.setState({ failed: false });
+  }
+  render() {
+    return this.state.failed ? <pre className="markdown-fallback">{this.props.content}</pre> : this.props.children;
+  }
+}
+
 /** GFM renderer styled from pi-web and TabTin, with a cheap streaming tail. */
 export function MarkdownMessage({ children, streaming = false }: { children: string; streaming?: boolean }) {
   const normalized = useMemo(() => normalizeMarkdown(children), [children]);
   const parts = useMemo(() => streaming ? splitStreamingMarkdown(normalized) : { stable: normalized, tail: "" }, [normalized, streaming]);
-  return <div className="markdown-body"><MarkdownChunk content={parts.stable}/><MarkdownChunk content={parts.tail}/>{streaming && <span className="stream-caret"/>}</div>;
+  return <MarkdownBoundary content={normalized}><div className="markdown-body"><MarkdownChunk content={parts.stable}/><MarkdownChunk content={parts.tail}/>{streaming && <span className="stream-caret"/>}</div></MarkdownBoundary>;
 }
