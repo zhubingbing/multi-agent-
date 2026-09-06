@@ -1,0 +1,10 @@
+.git
+.run
+.bin
+data
+node_modules
+**/node_modules
+**/dist
+**/.next
+*.log
+

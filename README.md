@@ -32,6 +32,18 @@ make install
 make start
 ```
 
+For containerized development (no local Go installation required), use:
+
+```bash
+make dev
+```
+
+This mounts the repository into the containers. Vite hot-reloads the Web UI,
+and Air rebuilds/restarts Control or Runtime when their Go/TypeScript sources
+change. Dependencies, build caches, Runtime data, and SQLite data live in
+named Docker volumes. Follow or stop the stack with `make dev-logs` and
+`make dev-down`.
+
 Open:
 
 ```text
@@ -89,6 +101,7 @@ The next production step is authenticated pairing, durable runtime/agent configu
 ## Design documents
 
 - [`docs/product-plan.md`](docs/product-plan.md) — product principles, concepts, phases, and UX quality gates.
+- [`docs/tabtin-replication-plan.md`](docs/tabtin-replication-plan.md) — screenshot/source audit and the phased plan for a TabTin-style workbench without replacing the existing conversation runtime.
 - [`docs/implementation-status.md`](docs/implementation-status.md) — current verified progress, open gaps, and execution order.
 - [`docs/architecture.md`](docs/architecture.md) — control/runtime/session architecture, goal-driven Squad/Leader orchestration, data model, unified participant routing, and bounded user-authorized Agent interactions.
 - [`docs/decisions/0002-goal-driven-squad-leader.md`](docs/decisions/0002-goal-driven-squad-leader.md) — decision to add Goal, Squad, event-driven Leader coordination, and skill/plugin-based Context Acquisition.

@@ -28,11 +28,13 @@ export function GroupChat({
   title = "Multi Agent Conversation",
   participantAgentIds,
   onCreateThread,
+  workbench = false,
 }: {
   conversationId?: string;
   title?: string;
   participantAgentIds?: string[];
   onCreateThread?: (rootTurnId: string) => void;
+  workbench?: boolean;
 }) {
   const [generatedConversationId] = useState(() => `group-${crypto.randomUUID()}`);
   const conversationId = providedConversationId ?? generatedConversationId;
@@ -261,8 +263,10 @@ export function GroupChat({
   };
 
   return <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", minWidth: 0, background: "var(--bg)" }}>
-    <header style={{ display: "flex", alignItems: "center", gap: 12, minHeight: 44, padding: "6px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-      <strong style={{ fontFamily: "var(--font-mono)" }}>{title}</strong>
+    <header style={workbench
+      ? { display: "flex", alignItems: "center", gap: 8, minHeight: 38, padding: "4px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg)", overflowX: "auto" }
+      : { display: "flex", alignItems: "center", gap: 12, minHeight: 44, padding: "6px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+      {!workbench && <strong style={{ fontFamily: "var(--font-mono)" }}>{title}</strong>}
       <div style={{ display: "flex", gap: 6 }}>
         {agents.map((agent) => {
           const agentRunning = activeAgentIds.includes(agent.id);
@@ -282,7 +286,7 @@ export function GroupChat({
         <option value="sequential">Sequential shared context</option>
         <option value="parallel">Parallel independent</option>
       </select>
-      <span role="status" aria-live="polite" style={{ marginLeft: "auto", color: connected ? "var(--text-muted)" : "#ef4444", fontSize: 11 }}>{notice}</span>
+      <span role="status" aria-live="polite" style={{ marginLeft: "auto", flexShrink: 0, color: connected ? "var(--text-muted)" : "#ef4444", fontSize: 11 }}>{notice}</span>
     </header>
 
     <ConversationTimeline

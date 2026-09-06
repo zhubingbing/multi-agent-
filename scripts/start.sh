@@ -29,8 +29,8 @@ npm run build
 PI_SDK_VERSION=$(node -p "require('./node_modules/@earendil-works/pi-coding-agent/package.json').version")
 export MULTI_AGENT_PI_VERSION="$PI_SDK_VERSION"
 
-cd "$ROOT/apps/pi-web"
-[[ -d node_modules ]] || npm ci --ignore-scripts
+cd "$ROOT/apps/workbench-web"
+[[ -d node_modules ]] || corepack pnpm install --filter @multi-agent/workbench-web...
 
 cd "$ROOT"
 go build -o "$BIN_DIR/control" ./cmd/control
@@ -56,19 +56,29 @@ nohup "$BIN_DIR/runtime" \
   >"$RUN_DIR/runtime-host.log" 2>&1 &
 echo $! >"$RUN_DIR/runtime-host.pid"
 
-docker-compose -f "$ROOT/compose.yaml" up -d
+if docker info >/dev/null 2>&1; then
+  docker-compose -f "$ROOT/compose.yaml" up -d
+else
+  echo "Docker is unavailable; starting the Web workbench with Host Runtime only" >&2
+fi
 
-# Next dev owns a child process and its .next lock. Prefer systemd so the web
+# Vite owns the browser workbench development server. Prefer systemd so the web
 # process is restarted if the host reaps or crashes it; fall back to tmux on
 # development machines without systemd.
 if command -v systemctl >/dev/null 2>&1 && systemctl cat multi-agent-web.service >/dev/null 2>&1; then
   systemctl restart multi-agent-web.service
   systemctl show multi-agent-web.service -p MainPID --value >"$RUN_DIR/web.pid"
 else
-  tmux kill-session -t multi-agent-web 2>/dev/null || true
-  tmux new-session -d -s multi-agent-web -c "$ROOT/apps/pi-web" \
-    "env PI_WEB_NO_OPEN=1 ./node_modules/.bin/next dev -H 127.0.0.1 -p 30148 >>'$RUN_DIR/web.log' 2>&1"
-  tmux list-panes -t multi-agent-web -F '#{pane_pid}' >"$RUN_DIR/web.pid"
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t multi-agent-web 2>/dev/null || true
+    tmux new-session -d -s multi-agent-web -c "$ROOT/apps/workbench-web" \
+      "./node_modules/.bin/vite --host 127.0.0.1 --port 30148 >>'$RUN_DIR/web.log' 2>&1"
+    tmux list-panes -t multi-agent-web -F '#{pane_pid}' >"$RUN_DIR/web.pid"
+  else
+    cd "$ROOT/apps/workbench-web"
+    nohup ./node_modules/.bin/vite --host 127.0.0.1 --port 30148 >>"$RUN_DIR/web.log" 2>&1 &
+    echo $! >"$RUN_DIR/web.pid"
+  fi
 fi
 
 ready_count=0
@@ -76,7 +86,7 @@ for _ in $(seq 1 180); do
   if curl -fsS http://127.0.0.1:30146/conversations >/dev/null 2>&1; then
     ready_count=$((ready_count + 1))
     if [[ $ready_count -ge 2 ]]; then
-      echo "Multi Agent: http://127.0.0.1:30146/conversations"
+      echo "Agent Workbench Web: http://127.0.0.1:30146/conversations"
       echo "Diagnostic: http://127.0.0.1:30146/group"
       echo "Control API: http://127.0.0.1:30146/api/multi-agent/agents"
       exit 0

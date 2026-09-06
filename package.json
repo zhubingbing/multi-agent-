@@ -3,9 +3,10 @@
   "private": true,
   "packageManager": "pnpm@10.29.3",
   "scripts": {
-    "build": "pnpm --filter @multi-agent/pi-host build && pnpm --filter @multi-agent/web build",
+    "dev": "npm --prefix apps/workbench-web run dev",
+    "build": "pnpm --filter @multi-agent/pi-host build && pnpm --filter @multi-agent/workbench-web build",
     "dev:host": "pnpm --filter @multi-agent/pi-host dev",
-    "dev:web": "pnpm --filter @multi-agent/web dev",
+    "dev:web": "pnpm --filter @multi-agent/workbench-web dev",
     "typecheck": "pnpm -r typecheck"
   }
 }

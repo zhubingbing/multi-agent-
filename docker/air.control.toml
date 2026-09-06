@@ -1,0 +1,16 @@
+root = "/workspace"
+tmp_dir = "/tmp/air-control"
+
+[build]
+cmd = "GOMAXPROCS=2 go build -p 1 -o /tmp/air-control/control ./cmd/control"
+bin = "/tmp/air-control/control"
+delay = 300
+include_ext = ["go"]
+exclude_dir = [".git", ".run", "apps", "data", "node_modules", "services"]
+stop_on_error = true
+send_interrupt = true
+kill_delay = "500ms"
+
+[log]
+time = true
+

@@ -1,13 +1,12 @@
 [Unit]
-Description=Multi Agent pi-web v0.8.11
+Description=Multi Agent Web Workbench (React + Vite)
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/mnt/data/code/code.bing.com/btc/multi-agent/apps/pi-web
-Environment=PI_WEB_NO_OPEN=1
+WorkingDirectory=/mnt/data/code/code.bing.com/btc/multi-agent/apps/workbench-web
 Environment=NODE_ENV=development
-ExecStart=/root/.nvm/versions/node/v24.13.0/bin/node ./node_modules/next/dist/bin/next dev -H 127.0.0.1 -p 30148
+ExecStart=/usr/bin/env corepack pnpm dev
 Restart=always
 RestartSec=2
 KillMode=mixed

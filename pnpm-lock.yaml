@@ -123,26 +123,17 @@ importers:
         specifier: ^5
         version: 5.9.3
 
-  apps/web:
+  apps/workbench-web:
     dependencies:
       '@vitejs/plugin-react':
         specifier: latest
         version: 6.1.1(vite@8.2.2(@types/node@25.9.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
-      lucide-react:
-        specifier: latest
-        version: 1.40.0(react@19.2.8)
       react:
-        specifier: latest
+        specifier: ^19.2.0
         version: 19.2.8
       react-dom:
-        specifier: latest
+        specifier: ^19.2.0
         version: 19.2.8(react@19.2.8)
-      react-markdown:
-        specifier: latest
-        version: 10.1.0(@types/react@19.2.18)(react@19.2.8)
-      remark-gfm:
-        specifier: latest
-        version: 4.0.1
       typescript:
         specifier: latest
         version: 7.0.2
@@ -151,10 +142,10 @@ importers:
         version: 8.2.2(@types/node@25.9.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0)
     devDependencies:
       '@types/react':
-        specifier: latest
+        specifier: ^19.2.0
         version: 19.2.18
       '@types/react-dom':
-        specifier: latest
+        specifier: ^19.2.0
         version: 19.2.7(@types/react@19.2.18)
 
   services/pi-host:
@@ -3126,11 +3117,6 @@ packages:
 
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
-
-  lucide-react@1.40.0:
-    resolution: {integrity: sha512-MaG+8WnOXkDWz9XeElj7TnQ890tTZUB0a36i03aRRCKGWE6e7jJpmdCvtxxuxcjjdqyN6m4sL6qlHVuSUDtYgg==}
-    peerDependencies:
-      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -7242,10 +7228,6 @@ snapshots:
   lru-cache@5.1.1:
     dependencies:
       yallist: 3.1.1
-
-  lucide-react@1.40.0(react@19.2.8):
-    dependencies:
-      react: 19.2.8
 
   magic-string@0.30.21:
     dependencies:

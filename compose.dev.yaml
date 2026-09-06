@@ -1,0 +1,88 @@
+name: multi-agent-dev
+
+services:
+  control:
+    build:
+      context: .
+      dockerfile: docker/dev.Dockerfile
+    command:
+      - air
+      - -c
+      - docker/air.control.toml
+      - --
+      - -addr
+      - 0.0.0.0:30146
+      - -web-upstream
+      - http://web:30148
+      - -db
+      - /data/control.db
+    environment:
+      GOCACHE: /cache/go-build
+      GOPROXY: https://goproxy.cn,direct
+    ports:
+      - "30146:30146"
+    volumes:
+      - ./:/workspace
+      - control-data:/data
+      - go-build-cache:/cache/go-build
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      - web
+    restart: unless-stopped
+
+  runtime:
+    build:
+      context: .
+      dockerfile: docker/dev.Dockerfile
+    command:
+      - /bin/bash
+      - -c
+      - npm --prefix services/pi-host install && exec air -c docker/air.runtime.toml
+    environment:
+      GOCACHE: /cache/go-build
+      GOPROXY: https://goproxy.cn,direct
+      HOME: /root
+      MULTI_AGENT_SERVER_URL: ws://control:30146/api/multi-agent/runtime/ws
+      MULTI_AGENT_RUNTIME_ID: runtime-dev
+      MULTI_AGENT_RUNTIME_NAME: Dev Runtime
+      MULTI_AGENT_AGENT_ID: dev-pi
+      MULTI_AGENT_AGENT_NAME: Dev Pi
+      MULTI_AGENT_AGENT_CWD: /workspace
+      MULTI_AGENT_ROOT: /workspace
+      PI_PROVIDER: ${PI_PROVIDER:-}
+      PI_MODEL: ${PI_MODEL:-}
+      PI_REASONING_LEVEL: ${PI_REASONING_LEVEL:-medium}
+    volumes:
+      - ./:/workspace
+      - ${HOME}/.pi/agent:/root/.pi/agent
+      - runtime-data:/workspace/data/runtimes/runtime-dev
+      - pi-host-node-modules:/workspace/services/pi-host/node_modules
+      - go-build-cache:/cache/go-build
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      - control
+    restart: unless-stopped
+
+  web:
+    image: node:22-bookworm
+    working_dir: /workspace
+    command:
+      - /bin/bash
+      - -lc
+      - corepack enable && corepack pnpm install --filter @multi-agent/workbench-web... --frozen-lockfile && exec corepack pnpm --filter @multi-agent/workbench-web exec vite --host 0.0.0.0 --port 30148
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./:/workspace
+      - root-node-modules:/workspace/node_modules
+      - web-node-modules:/workspace/apps/workbench-web/node_modules
+    restart: unless-stopped
+
+volumes:
+  control-data:
+  runtime-data:
+  pi-host-node-modules:
+  root-node-modules:
+  web-node-modules:
+  go-build-cache:
+  go-mod-cache:

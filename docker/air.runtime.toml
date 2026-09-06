@@ -1,0 +1,16 @@
+root = "/workspace"
+tmp_dir = "/tmp/air-runtime"
+
+[build]
+cmd = "npm --prefix services/pi-host run build && GOMAXPROCS=2 go build -p 1 -o /tmp/air-runtime/runtime ./cmd/runtime"
+bin = "/tmp/air-runtime/runtime"
+delay = 400
+include_ext = ["go", "ts"]
+exclude_dir = [".git", ".run", "apps", "data", "node_modules", "services/pi-host/dist", "services/pi-host/node_modules"]
+stop_on_error = true
+send_interrupt = true
+kill_delay = "1s"
+
+[log]
+time = true
+

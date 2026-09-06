@@ -1,11 +1,31 @@
 services:
+  control:
+    build:
+      context: .
+      dockerfile: docker/control.Dockerfile
+    image: multi-agent-control:dev
+    command:
+      - -addr
+      - 0.0.0.0:30146
+      - -web-upstream
+      - http://host.docker.internal:30148
+      - -db
+      - /app/data/control.db
+    ports:
+      - "30146:30146"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
   runtime-b:
     build:
       context: .
       dockerfile: docker/runtime.Dockerfile
     image: multi-agent-runtime:dev
     environment:
-      MULTI_AGENT_SERVER_URL: ws://host.docker.internal:30146/api/multi-agent/runtime/ws
+      MULTI_AGENT_SERVER_URL: ws://control:30146/api/multi-agent/runtime/ws
       MULTI_AGENT_RUNTIME_TOKEN: multi-agent-dev
       MULTI_AGENT_RUNTIME_ID: runtime-docker
       MULTI_AGENT_RUNTIME_NAME: Docker Runtime
@@ -24,6 +44,8 @@ services:
       - ${HOME}/.pi/agent:/root/.pi/agent
       - runtime-b-data:/data
     restart: unless-stopped
+    depends_on:
+      - control
 
 volumes:
   runtime-b-data:
