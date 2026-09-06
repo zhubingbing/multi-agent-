@@ -1,10 +1,12 @@
-import { Component, memo, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { Component, createContext, memo, useContext, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { MermaidBlock } from "./MermaidBlock";
 
 const ANSI_ESCAPE = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001B\\))/g;
 const CONTROL_CHAR = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 const CODE_FENCE = /^(`{3,}|~{3,})/;
+const MAX_MARKDOWN_CHARS = 100_000;
 
 function normalizeMarkdown(value: string): string {
   return value
@@ -42,12 +44,16 @@ function nodeText(value: ReactNode): string {
   return "";
 }
 
+const StreamingMarkdownContext = createContext(false);
+
 function Code({ className, children }: { className?: string; children?: ReactNode }) {
+  const streaming = useContext(StreamingMarkdownContext);
   const [copied, setCopied] = useState(false);
   const raw = nodeText(children).replace(/\n$/, "");
   const language = className?.replace(/^language-/, "") || "text";
   const block = Boolean(className?.startsWith("language-") || raw.includes("\n"));
   if (!block) return <code className="markdown-inline-code">{children}</code>;
+  if (language === "mermaid") return <MermaidBlock code={raw} streaming={streaming}/>;
   const copy = async () => {
     await navigator.clipboard.writeText(raw);
     setCopied(true);
@@ -65,24 +71,30 @@ const components: Components = {
 };
 
 type RehypePlugin = NonNullable<ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>[number];
+type RemarkPlugin = NonNullable<ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>[number];
 let loadedHighlight: RehypePlugin | null = null;
-const highlightPromise = import("rehype-highlight").then((module) => {
-  loadedHighlight = module.default as RehypePlugin;
-  return loadedHighlight;
-});
+let loadedKatex: RehypePlugin | null = null;
+let loadedMath: RemarkPlugin | null = null;
+const highlightPromise = import("rehype-highlight").then((module) => loadedHighlight = module.default as RehypePlugin);
+const katexPromise = import("rehype-katex").then((module) => loadedKatex = module.default as RehypePlugin);
+const mathPromise = import("remark-math").then((module) => loadedMath = module.default as RemarkPlugin);
 
-function useHighlight(): RehypePlugin | null {
-  // A Unified plugin is itself a function, so always use lazy initialization;
-  // passing it directly to useState would make React execute it as an initializer.
-  const [plugin, setPlugin] = useState<RehypePlugin | null>(() => loadedHighlight);
-  useEffect(() => { if (!plugin) void highlightPromise.then((value) => setPlugin(() => value)); }, [plugin]);
-  return plugin;
+function useMarkdownPlugins() {
+  // Unified plugins are functions, so lazy initialization prevents React from
+  // invoking them as state initializer callbacks.
+  const [highlight, setHighlight] = useState<RehypePlugin | null>(() => loadedHighlight);
+  const [katex, setKatex] = useState<RehypePlugin | null>(() => loadedKatex);
+  const [math, setMath] = useState<RemarkPlugin | null>(() => loadedMath);
+  useEffect(() => { if (!highlight) void highlightPromise.then((value) => setHighlight(() => value)); }, [highlight]);
+  useEffect(() => { if (!katex) void katexPromise.then((value) => setKatex(() => value)); }, [katex]);
+  useEffect(() => { if (!math) void mathPromise.then((value) => setMath(() => value)); }, [math]);
+  return { highlight, katex, math };
 }
 
 const MarkdownChunk = memo(function MarkdownChunk({ content }: { content: string }) {
-  const highlight = useHighlight();
+  const { highlight, katex, math } = useMarkdownPlugins();
   if (!content) return null;
-  return <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={highlight ? [highlight] : []} components={components}>{content}</ReactMarkdown>;
+  return <ReactMarkdown remarkPlugins={[remarkGfm, ...(math ? [math] : [])]} rehypePlugins={[...(katex ? [katex] : []), ...(highlight ? [highlight] : [])]} components={components}>{content}</ReactMarkdown>;
 });
 
 class MarkdownBoundary extends Component<{ content: string; children: ReactNode }, { failed: boolean }> {
@@ -98,7 +110,10 @@ class MarkdownBoundary extends Component<{ content: string; children: ReactNode 
 
 /** GFM renderer styled from pi-web and TabTin, with a cheap streaming tail. */
 export function MarkdownMessage({ children, streaming = false }: { children: string; streaming?: boolean }) {
+  const [showLarge, setShowLarge] = useState(false);
   const normalized = useMemo(() => normalizeMarkdown(children), [children]);
   const parts = useMemo(() => streaming ? splitStreamingMarkdown(normalized) : { stable: normalized, tail: "" }, [normalized, streaming]);
-  return <MarkdownBoundary content={normalized}><div className="markdown-body"><MarkdownChunk content={parts.stable}/><MarkdownChunk content={parts.tail}/>{streaming && <span className="stream-caret"/>}</div></MarkdownBoundary>;
+  if (normalized.length > MAX_MARKDOWN_CHARS && !showLarge) return <button type="button" className="large-message" onClick={() => setShowLarge(true)}>消息较大（{Math.round(normalized.length / 1000)} KB），点击以纯文本查看</button>;
+  if (normalized.length > MAX_MARKDOWN_CHARS) return <pre className="markdown-fallback large">{normalized}</pre>;
+  return <MarkdownBoundary content={normalized}><StreamingMarkdownContext.Provider value={streaming}><div className="markdown-body"><MarkdownChunk content={parts.stable}/><MarkdownChunk content={parts.tail}/>{streaming && <span className="stream-caret"/>}</div></StreamingMarkdownContext.Provider></MarkdownBoundary>;
 }
