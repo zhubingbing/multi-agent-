@@ -10,11 +10,15 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "@multi-agent/chat-core": "workspace:*",
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "7.0.2",
+    "remark-gfm": "^4.0.1",
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",

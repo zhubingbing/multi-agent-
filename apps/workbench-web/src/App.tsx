@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { captureScrollDistance, getLiveFollowAttached, getNextVisibleCount, getVisibleRenderWindow, restoreScrollTop, VISIBLE_PAGE_SIZE, type ToolResultMessage } from "@multi-agent/chat-core";
+import { assistantMessages, emptyLiveRun, reduceLiveRun, type AgentSessionEvent, type AssistantMessage, type LiveRun } from "./chat-stream";
+import { MarkdownMessage } from "./MarkdownMessage";
 
 type View = "tasks" | "agents" | "apps" | "automation" | "settings";
 type TaskMode = "chat" | "split" | "canvas";
@@ -69,6 +72,8 @@ export function App() {
   const [canvasTab, setCanvasTab] = useState<CanvasTab>("workspace");
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState<string[]>([]);
+  const [liveRuns, setLiveRuns] = useState<LiveRun[]>([]);
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const [draft, setDraft] = useState("");
   const [draftAgentId, setDraftAgentId] = useState("");
   const [creatingFromDraft, setCreatingFromDraft] = useState(false);
@@ -79,11 +84,18 @@ export function App() {
   const [createAgents, setCreateAgents] = useState<string[]>([]);
   const [error, setError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
+  const pendingPromptRef = useRef<{ conversationId: string; message: string; agentId: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const followTailRef = useRef(true);
+  const previousScrollTopRef = useRef(0);
+  const restoreDistanceRef = useRef<number | null>(null);
+  const runtimeCursorsRef = useRef(new Map<string, number>());
 
   const active = channels.find((channel) => channel.id === activeId);
   const participants = active?.agentIds.flatMap((id) => agents.find((agent) => agent.id === id) ?? []) ?? [];
   const filteredChannels = useMemo(() => channels.filter((channel) => channel.title.toLocaleLowerCase().includes(search.toLocaleLowerCase())), [channels, search]);
+  const { startIndex: visibleStart, hasMore: hasEarlierMessages } = getVisibleRenderWindow(messages.length, visibleCount);
+  const visibleMessages = messages.slice(visibleStart);
 
   const loadShell = useCallback(async () => {
     try {
@@ -109,12 +121,20 @@ export function App() {
 
   const loadConversation = useCallback(async (conversationId: string) => {
     if (!conversationId) { setMessages([]); setBindings([]); return; }
-    const [messageResponse, bindingResponse] = await Promise.all([
+    const [messageResponse, bindingResponse, turnResponse] = await Promise.all([
       fetch(`/api/multi-agent/conversations/${encodeURIComponent(conversationId)}/messages`, { cache: "no-store" }),
       fetch(`/api/multi-agent/bindings?conversationId=${encodeURIComponent(conversationId)}`, { cache: "no-store" }),
+      fetch(`/api/multi-agent/conversations/${encodeURIComponent(conversationId)}/turns`, { cache: "no-store" }),
     ]);
     if (messageResponse.ok) setMessages(((await messageResponse.json()) as { messages?: PublicMessage[] }).messages ?? []);
     if (bindingResponse.ok) setBindings(((await bindingResponse.json()) as { bindings?: Binding[] }).bindings ?? []);
+    if (turnResponse.ok) {
+      const data = await turnResponse.json() as { cursors?: Array<{ runtimeId: string; instanceId: string; sequence: number }> };
+      for (const cursor of data.cursors ?? []) {
+        const key = `${cursor.runtimeId}\u0000${cursor.instanceId}`;
+        runtimeCursorsRef.current.set(key, Math.max(runtimeCursorsRef.current.get(key) ?? 0, cursor.sequence));
+      }
+    }
   }, []);
 
   useEffect(() => { void loadShell(); }, [loadShell]);
@@ -129,30 +149,82 @@ export function App() {
       if (stopped) return;
       const socket = new WebSocket(socketUrl(activeId));
       socketRef.current = socket;
-      socket.onopen = () => setConnected(true);
-      socket.onmessage = ({ data }) => {
-        const event = JSON.parse(data) as { type?: string; agentId?: string; agentIds?: string[] };
-        if (event.type === "dispatched") setRunning(event.agentIds ?? []);
-        if (event.type === "agent_event" && event.agentId && !running.includes(event.agentId)) setRunning((current) => [...new Set([...current, event.agentId!])]);
-        if (["conversation_committed", "agent_error", "persistence_error"].includes(event.type ?? "")) {
-          void loadConversation(activeId);
-          if (event.agentId) setRunning((current) => current.filter((id) => id !== event.agentId));
+      socket.onopen = () => {
+        setConnected(true);
+        const pending = pendingPromptRef.current;
+        if (pending?.conversationId === activeId) {
+          pendingPromptRef.current = null;
+          dispatchPrompt(socket, pending.message, [pending.agentId], "parallel");
         }
+      };
+      socket.onmessage = ({ data }) => {
+        const event = JSON.parse(data) as { type?: string; runtimeId?: string; instanceId?: string; runtimeSeq?: number; agentId?: string; agentIds?: string[]; runId?: string; event?: AgentSessionEvent; error?: string };
+        if (event.runtimeId && event.instanceId && event.runtimeSeq) {
+          const key = `${event.runtimeId}\u0000${event.instanceId}`;
+          const cursor = runtimeCursorsRef.current.get(key) ?? 0;
+          if (event.runtimeSeq <= cursor) return;
+          runtimeCursorsRef.current.set(key, event.runtimeSeq);
+        }
+        if (event.type === "dispatched") setRunning(event.agentIds ?? []);
+        if (event.type === "agent_event" && event.agentId && event.event) {
+          setRunning((current) => current.includes(event.agentId!) ? current : [...current, event.agentId!]);
+          setLiveRuns((current) => {
+            const index = current.findIndex((run) => run.id === event.runId || (!event.runId && run.agentId === event.agentId));
+            const base: LiveRun = index >= 0 ? current[index] : emptyLiveRun(event.runId ?? `live-${event.agentId}`, event.agentId!);
+            const next = reduceLiveRun(base, event.event!);
+            return index >= 0 ? current.map((run, runIndex) => runIndex === index ? next : run) : [...current, next];
+          });
+        }
+        if (event.type === "conversation_committed") {
+          void loadConversation(activeId).finally(() => {
+            if (event.runId) setLiveRuns((current) => current.filter((run) => run.id !== event.runId));
+            if (event.agentId) setRunning((current) => current.filter((id) => id !== event.agentId));
+          });
+        }
+        if (event.type === "agent_error" && event.agentId) {
+          setRunning((current) => current.filter((id) => id !== event.agentId));
+          setLiveRuns((current) => current.map((run) => run.id === event.runId || run.agentId === event.agentId ? { ...run, status: "failed", error: event.error ?? "Runtime error" } : run));
+        }
+        if (event.type === "persistence_error") void loadConversation(activeId);
       };
       socket.onclose = () => { setConnected(false); if (!stopped) timer = window.setTimeout(connect, 800); };
     };
     connect();
     return () => { stopped = true; if (timer) clearTimeout(timer); socketRef.current?.close(); socketRef.current = null; };
   }, [activeId, active?.agentIds, agents, loadConversation]);
-  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages, running]);
+  useEffect(() => {
+    setVisibleCount(VISIBLE_PAGE_SIZE);
+    followTailRef.current = true;
+    previousScrollTopRef.current = 0;
+    restoreDistanceRef.current = null;
+  }, [activeId]);
+  useLayoutEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    if (restoreDistanceRef.current !== null) {
+      container.scrollTop = restoreScrollTop(container.scrollHeight, restoreDistanceRef.current);
+      restoreDistanceRef.current = null;
+    } else if (followTailRef.current) {
+      container.scrollTop = container.scrollHeight;
+    }
+    previousScrollTopRef.current = container.scrollTop;
+  }, [messages, liveRuns, visibleCount]);
+
+  const revealEarlierMessages = () => {
+    const container = scrollRef.current;
+    if (container) restoreDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+    followTailRef.current = false;
+    setVisibleCount((current) => getNextVisibleCount(current));
+  };
 
   const chooseMode = (next: TaskMode) => { setMode(next); localStorage.setItem("workbench-task-mode-v2", next); };
-  const selectTask = (id: string) => { setActiveId(id); setView("tasks"); };
+  const selectTask = (id: string) => { setLiveRuns([]); setRunning([]); followTailRef.current = true; setActiveId(id); setView("tasks"); };
   const beginDraftTask = () => {
     setActiveId("");
     setMessages([]);
     setBindings([]);
     setRunning([]);
+    setLiveRuns([]);
     setDraft("");
     setDraftAgentId((current) => current || agents.find((agent) => agent.online)?.id || agents[0]?.id || "");
     setView("tasks");
@@ -174,6 +246,10 @@ export function App() {
     const runIds = Object.fromEntries(targets.map((id) => [id, crypto.randomUUID()]));
     setMessages((current) => [...current, { id: `optimistic-${turnId}`, turnId, authorType: "member", authorId: "local-user", content: { role: "user", content: message }, createdAt }]);
     setRunning(targets);
+    setLiveRuns((current) => [...current.filter((run) => !targets.includes(run.agentId)), ...targets.map((agentId, index) => emptyLiveRun(
+      runIds[agentId], agentId, requestedMode === "sequential" && targets.length > 1 && index > 0 ? "queued" : "running",
+    ))]);
+    followTailRef.current = true;
     socket.send(JSON.stringify({ type: "prompt", message, agentIds: targets, turnId, createdAt, runIds, executionMode: targets.length > 1 ? requestedMode : "parallel" }));
   };
 
@@ -202,14 +278,9 @@ export function App() {
       const { channel } = await response.json() as { channel: Channel };
       setChannels((current) => [channel, ...current]);
       setSelectedAgents([target.id]);
+      pendingPromptRef.current = { conversationId: channel.id, message, agentId: target.id };
       setActiveId(channel.id);
       setDraft("");
-      const socket = new WebSocket(socketUrl(channel.id));
-      socket.onopen = () => {
-        dispatchPrompt(socket, message, [target.id], "parallel");
-        window.setTimeout(() => socket.close(), 400);
-      };
-      socket.onerror = () => setError("任务已创建，但发送失败，请在任务中重新发送。 ");
     } catch (reason) {
       setError(`创建任务失败：${reason instanceof Error ? reason.message : String(reason)}`);
     } finally {
@@ -227,7 +298,7 @@ export function App() {
       <main className="main">
         {error && <div className="error">{error}<button onClick={() => setError("")}>×</button></div>}
         {view === "tasks" ? active ? <div className={`task-layout mode-${mode}`}>
-          <section className="conversation"><TaskHeader title={active.title}/><div className="agent-strip">{participants.map((agent) => <button key={agent.id} disabled={!agent.online} className={selectedAgents.includes(agent.id) ? "selected" : ""} onClick={() => setSelectedAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span>{agent.name}</span><i>{running.includes(agent.id) ? "运行中" : agent.online ? "可用" : "离线"}</i></button>)}{selectedAgents.length > 1 && <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "sequential" | "parallel")}><option value="sequential">顺序协作</option><option value="parallel">并行协作</option></select>}</div><div className="timeline" ref={scrollRef}>{messages.length === 0 && <Welcome agent={participants[0]}/>} {messages.map((message) => <Message key={message.id} message={message} agent={agents.find((candidate) => candidate.id === message.authorId)}/>)}{running.map((id) => <div className="agent-running" key={id}><Avatar agent={agents.find((agent) => agent.id === id)}/><span><b>{agents.find((agent) => agent.id === id)?.name}</b><i/><i/><i/></span></div>)}</div><form className="composer" onSubmit={send}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="提个问题，我来查找和分析…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}/><div><span>{participants.find((agent) => selectedAgents.includes(agent.id))?.name || "选择 AI 分身"}⌄</span><span>{participants.find((agent) => selectedAgents.includes(agent.id))?.desiredModel || "默认模型"}⌄</span><span>按需确认⌄</span><button disabled={!draft.trim() || !connected}><Icon name="send" size={16}/></button></div></form></section>
+          <section className="conversation"><TaskHeader title={active.title}/><div className="agent-strip">{participants.map((agent) => <button key={agent.id} disabled={!agent.online} className={selectedAgents.includes(agent.id) ? "selected" : ""} onClick={() => setSelectedAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span>{agent.name}</span><i>{running.includes(agent.id) ? "运行中" : agent.online ? "可用" : "离线"}</i></button>)}{selectedAgents.length > 1 && <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "sequential" | "parallel")}><option value="sequential">顺序协作</option><option value="parallel">并行协作</option></select>}</div><div className="timeline" ref={scrollRef} onScroll={(event) => { const target = event.currentTarget; followTailRef.current = getLiveFollowAttached(followTailRef.current, previousScrollTopRef.current, target.scrollTop, target.clientHeight, target.scrollHeight); previousScrollTopRef.current = target.scrollTop; }}>{hasEarlierMessages && <div className="load-history"><button type="button" onClick={revealEarlierMessages}>加载更早消息</button></div>}{messages.length === 0 && liveRuns.length === 0 && <Welcome agent={participants[0]}/>} {visibleMessages.map((message) => <Message key={message.id} message={message} agent={agents.find((candidate) => candidate.id === message.authorId)}/>)}{liveRuns.map((run) => <LiveAgentRun key={run.id} run={run} agent={agents.find((agent) => agent.id === run.agentId)}/>)}</div><form className="composer" onSubmit={send}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="提个问题，我来查找和分析…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}/><div><span>{participants.find((agent) => selectedAgents.includes(agent.id))?.name || "选择 AI 分身"}⌄</span><span>{participants.find((agent) => selectedAgents.includes(agent.id))?.desiredModel || "默认模型"}⌄</span><span>按需确认⌄</span><button disabled={!draft.trim() || !connected}><Icon name="send" size={16}/></button></div></form></section>
           <TaskCanvas tab={canvasTab} onTab={setCanvasTab} active={active} agents={participants} runtimes={runtimes} bindings={bindings} mode={mode} onMode={chooseMode}/>
         </div> : <DraftTaskHome agents={agents} selectedAgentId={draftAgentId} onSelectAgent={setDraftAgentId} draft={draft} onDraft={setDraft} onSend={sendDraftTask} sending={creatingFromDraft}/> : <ModulePage view={view} agents={agents} runtimes={runtimes}/>} 
       </main>
@@ -263,7 +334,36 @@ function Avatar({ agent }: { agent?: Agent }) { return <span className="avatar">
 function ModeSwitch({ mode, onMode }: { mode: TaskMode; onMode: (mode: TaskMode) => void }) { return <div className="mode-switch"><button title="对话聚焦" className={mode === "chat" ? "active" : ""} onClick={() => onMode("chat")}><Icon name="chat" size={15}/></button><button title="分屏" className={mode === "split" ? "active" : ""} onClick={() => onMode("split")}><Icon name="columns" size={15}/></button><button title="工作台聚焦" className={mode === "canvas" ? "active" : ""} onClick={() => onMode("canvas")}><Icon name="canvas" size={15}/></button></div>; }
 function TaskHeader({ title }: { title: string }) { return <header className="task-header"><b>{title}</b><div className="task-header-actions"><button title="任务设置">⌂</button><button title="协作者">♧</button></div></header>; }
 function Welcome({ agent }: { agent?: Agent }) { return <div className="welcome"><Avatar agent={agent}/><h2>想先做点什么？</h2><p>描述目标，{agent?.name || "AI 分身"} 会理解任务、使用工具并持续推进。</p><div><button>分析当前项目</button><button>整理一份执行计划</button><button>让多个分身协作</button></div></div>; }
-function Message({ message, agent }: { message: PublicMessage; agent?: Agent }) { const text = textOf(message); if (!text) return null; const user = message.authorType === "member"; return <article className={user ? "message user-message" : "message agent-message"}>{!user && <header><Avatar agent={agent}/><b>{agent?.name || message.authorId}</b></header>}<div>{text.split("\n").map((line, index) => <p key={index}>{line || <br/>}</p>)}</div><time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></article>; }
+function AssistantBlocks({ message, streaming = false, toolResults }: { message: AssistantMessage; streaming?: boolean; toolResults?: Map<string, ToolResultMessage> }) {
+  return <div className="assistant-blocks">{message.content.map((block, index) => {
+    if (block.type === "text") return <MarkdownMessage key={index} streaming={streaming && index === message.content.length - 1}>{block.text}</MarkdownMessage>;
+    if (block.type === "thinking") return <details className="thinking-block" open={streaming} key={index}><summary>思考过程{streaming ? " · 正在思考" : ""}</summary><div>{block.thinking}</div></details>;
+    if (block.type === "toolCall") {
+      const result = toolResults?.get(block.toolCallId);
+      const resultText = result?.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+      const resultError = result?.isError === true;
+      return <details className="tool-block" key={index}><summary><span>工具</span>{block.toolName}{streaming ? " · 执行中" : result ? resultError ? " · 失败" : " · 已完成" : ""}</summary><pre>{block.rawInput || JSON.stringify(block.input, null, 2)}</pre>{resultText && <div className={`tool-result ${resultError ? "error" : ""}`}><b>{resultError ? "错误" : "结果"}</b><pre>{resultText}</pre></div>}</details>;
+    }
+    return null;
+  })}</div>;
+}
+function ProcessPanel({ messageCount, toolCount, children }: { messageCount: number; toolCount: number; children: ReactNode }) {
+  const [expanded, setExpanded] = useState(true);
+  return <div className="process-panel"><button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}><span className={expanded ? "expanded" : ""}>›</span>执行过程 · {messageCount} 条消息{toolCount ? ` · ${toolCount} 次工具调用` : ""}</button>{expanded && <div>{children}</div>}</div>;
+}
+function LiveAgentRun({ run, agent }: { run: LiveRun; agent?: Agent }) {
+  const live = run.stream.streamingMessage;
+  const completed = assistantMessages(run.messages);
+  const toolResults = new Map(run.messages.filter((message): message is ToolResultMessage => message.role === "toolResult").map((message) => [message.toolCallId, message]));
+  const toolCount = [...completed, ...(live ? [live] : [])].reduce((count, message) => count + message.content.filter((block) => block.type === "toolCall").length, 0);
+  const hasContent = completed.length > 0 || Boolean(live);
+  return <article className="live-agent-run"><header><Avatar agent={agent}/><b>{agent?.name || run.agentId}</b><span className={`run-status ${run.status}`}>{run.error ? "执行失败" : run.status === "queued" ? "等待中" : "运行中"}</span></header>
+    {hasContent && <ProcessPanel messageCount={completed.length + (live ? 1 : 0)} toolCount={toolCount}>{completed.map((message, index) => <AssistantBlocks message={message} toolResults={toolResults} key={index}/>)}{live && <AssistantBlocks message={live} toolResults={toolResults} streaming/>}</ProcessPanel>}
+    {!hasContent && !run.error && <div className="agent-running"><span><i/><i/><i/></span></div>}
+    {run.error && <div className="run-error">{run.error}</div>}
+  </article>;
+}
+function Message({ message, agent }: { message: PublicMessage; agent?: Agent }) { const text = textOf(message); if (!text) return null; const user = message.authorType === "member"; return <article className={user ? "message user-message" : "message agent-message"}>{!user && <header><Avatar agent={agent}/><b>{agent?.name || message.authorId}</b></header>}<div><MarkdownMessage>{text}</MarkdownMessage></div><time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></article>; }
 function TaskCanvas({ tab, onTab, active, agents, runtimes, bindings, mode, onMode }: { tab: CanvasTab; onTab: (tab: CanvasTab) => void; active: Channel; agents: Agent[]; runtimes: Runtime[]; bindings: Binding[]; mode: TaskMode; onMode: (mode: TaskMode) => void }) {
   if (mode === "chat") return <aside className="canvas canvas-rail"><nav><b>打开的标签</b><ModeSwitch mode={mode} onMode={onMode}/></nav><div className="canvas-rail-body"><p>打开文档、网页或终端后会显示在这里</p><div className="rail-shortcuts"><h3>快捷入口</h3><button><Icon name="folder" size={16}/>目录</button><button><Icon name="database" size={16}/>云盘</button><button><Icon name="database" size={16}/>多维表</button><button><Icon name="file" size={16}/>文档</button><button className="workbench"><Icon name="apps" size={16}/>工作台</button></div></div></aside>;
   return <aside className="canvas"><nav><button className={tab === "assets" ? "active" : ""} onClick={() => onTab("assets")}>资产</button><button className={tab === "workspace" ? "active" : ""} onClick={() => onTab("workspace")}>工作空间</button><button className={tab === "runs" ? "active" : ""} onClick={() => onTab("runs")}>运行</button><ModeSwitch mode={mode} onMode={onMode}/></nav><div className="canvas-body">{tab === "workspace" && <><h2>{active.title}</h2><Section title="工作目录"><div className="info-card"><Icon name="folder"/><span><b>{agents[0]?.desiredCwd || agents[0]?.cwd || "尚未设置"}</b><small>本机工作空间</small></span></div></Section><Section title="AI 分身">{agents.map((agent) => <div className="person" key={agent.id}><Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.desiredModel || agent.provider} · {agent.presence || "available"}</small></span></div>)}</Section><Section title="任务设置"><div className="rows"><button>授权策略 <span>按需确认 ›</span></button><button>执行限制 <span>默认 ›</span></button><button>归档任务 <span>›</span></button></div></Section></>}{tab === "assets" && <><h2>任务资产</h2><div className="quick"><Quick icon="folder" label="目录"/><Quick icon="file" label="文档"/><Quick icon="database" label="多维表"/><Quick icon="globe" label="浏览器"/><Quick icon="terminal" label="终端"/></div><Empty title="还没有打开的资产" description="Agent 创建和修改的文件会显示在这里。"/></>}{tab === "runs" && <><h2>执行状态</h2>{runtimes.map((runtime) => <div className="runtime" key={runtime.id}><i className={runtime.status === "online" ? "online" : ""}/><span><b>{runtime.name}</b><small>{runtime.status} · {runtime.os}/{runtime.architecture}</small><small>Node {runtime.nodeVersion || "-"} · Pi {runtime.piVersion || "-"}</small></span></div>)}{bindings.map((binding) => <div className="binding" key={binding.agentId}><b>{agents.find((agent) => agent.id === binding.agentId)?.name || binding.agentId}</b><span>Session #{binding.generation}</span><small>{binding.effectiveProvider}/{binding.effectiveModel} · {binding.state}</small></div>)}</>}</div></aside>;

@@ -1,8 +1,9 @@
 # Multi Agent MVP
 
-A distributed multi-agent conversation prototype built from:
+A distributed multi-agent workbench built from:
 
-- the complete `agegr/pi-web` v0.8.11 UI and message renderer (MIT);
+- a dedicated Vite/React Agent Workbench in `apps/workbench-web`;
+- a shared, product-owned Chat Core migrated from the proven `agegr/pi-web` behavior;
 - a Go control server inspired by Multica's outbound-runtime model;
 - one Go runtime on the host and one in Docker;
 - one persistent multi-session Pi SDK host per runtime.
@@ -10,10 +11,10 @@ A distributed multi-agent conversation prototype built from:
 ## Running topology
 
 ```text
-pi-web /conversations :30146 (public Go same-origin gateway)
+workbench-web /conversations :30146 (public Go same-origin gateway)
         │ browser WebSocket
         ▼
-Go control :30146 ──HTTP proxy──▶ pi-web Next.js :30148 (loopback only)
+Go control :30146 ──HTTP proxy──▶ Vite Workbench :30148 (container/loopback only)
     ┌───┴────────────────┐
     ▼                    ▼
 Host Runtime         Docker Runtime
@@ -23,7 +24,7 @@ Pi SDK Host          Pi SDK Host
 AgentSession         AgentSession
 ```
 
-Each `(conversation, agent)` pair owns an independent Pi `AgentSession`. Pi events are forwarded without database polling and rendered with pi-web's existing `MessageView`, `MarkdownBody`, streaming reducer, and `ChatInput`. The target product treats both humans and agents as first-class conversation participants and adds goal-driven squads: work assigned to a squad first wakes its Leader Agent, which plans, delegates to members, stops while they execute, and is re-awakened by results to review, replan, or deliver. Agents can acquire context through their configured skills and plugins, and can also be awakened by mentions, replies, assignments, timers, or an explicitly authorized multi-agent interaction such as role-play, debate, brainstorming, or a timed performance.
+Each `(conversation, agent)` pair owns an independent Pi `AgentSession`. `apps/workbench-web` is the primary product UI. Its streaming reducer, Runtime event projection, message normalization, turn presentation, replay deduplication, and lazy-scroll behavior live in `packages/chat-core`, migrated from pi-web's proven implementation. `apps/pi-web` is now a compatibility and regression reference while its remaining message renderer and composer capabilities are moved into the Workbench; no new product UI should be built there. The target product treats both humans and agents as first-class conversation participants and adds goal-driven squads: work assigned to a squad first wakes its Leader Agent, which plans, delegates to members, stops while they execute, and is re-awakened by results to review, replan, or deliver. Agents can acquire context through their configured skills and plugins, and can also be awakened by mentions, replies, assignments, timers, or an explicitly authorized multi-agent interaction such as role-play, debate, brainstorming, or a timed performance.
 
 ## Start
 
@@ -78,7 +79,7 @@ docker-compose -f compose.yaml logs -f runtime-b
 - Both online Agent chips are shown at the top; only the first online Agent is selected by default so baseline latency tests do not accidentally issue two simultaneous provider requests.
 - Sending dispatches to the selected online Agent set; an explicit `@agent` mention narrows and orders the targets. Multi-Agent turns can run as `Sequential shared context` (default) or `Parallel independent`; sequential runs inject prior authoritative Agent results into the next Agent prompt.
 - Runtime nodes report process instance, Runtime/Node/Pi versions, OS/architecture and capabilities. Durable Agent desired config (provider/model/thinking/cwd/instructions) is separated from observed Runtime state; Conversation-Agent bindings expose native session ID, effective config and generation, and support message-preserving Session replacement.
-- Responses stream into the same Conversation and retain pi-web's thinking, tool-call, Markdown, timing, model, usage, and copy presentation through upstream components.
+- Responses stream into the same Conversation. The Workbench already shares pi-web's event projection, streaming reducer, normalization, replay cursor handling, lazy history window, and tail-follow behavior through `packages/chat-core`; rich tool/result presentation and composer controls are being migrated next.
 - Running Agent turns can receive per-employee or bulk steering, follow-up, and abort commands.
 - Agent-authored `@employee` mentions are persisted to a durable employee Inbox and can wake an idle digital employee for a direct, message-linked reply. Ordinary employee communication does not require a formal Interaction; duplicate source/recipient delivery, self-wake, busy employees and per-root auto-hop limits provide the initial safety boundary.
 
@@ -106,6 +107,6 @@ The next production step is authenticated pairing, durable runtime/agent configu
 - [`docs/architecture.md`](docs/architecture.md) — control/runtime/session architecture, goal-driven Squad/Leader orchestration, data model, unified participant routing, and bounded user-authorized Agent interactions.
 - [`docs/decisions/0002-goal-driven-squad-leader.md`](docs/decisions/0002-goal-driven-squad-leader.md) — decision to add Goal, Squad, event-driven Leader coordination, and skill/plugin-based Context Acquisition.
 
-## Upstream
+## Legacy reference
 
-`apps/pi-web` is based on `agegr/pi-web` v0.8.11. See `apps/pi-web/LICENSE`, `apps/pi-web/UPSTREAM_COMMIT`, and `THIRD_PARTY_NOTICES.md`.
+`apps/pi-web` is based on `agegr/pi-web` v0.8.11 and is retained temporarily as a compatibility route, regression suite, and migration source. `apps/workbench-web` is the product frontend and must not import runtime code from `apps/pi-web`; reusable behavior moves into `packages/chat-core` or into Workbench-owned components first. See `apps/pi-web/LICENSE`, `apps/pi-web/UPSTREAM_COMMIT`, and `THIRD_PARTY_NOTICES.md`.
