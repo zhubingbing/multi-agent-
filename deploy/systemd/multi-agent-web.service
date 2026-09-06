@@ -1,0 +1,19 @@
+[Unit]
+Description=Multi Agent pi-web v0.8.11
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/data/code/code.bing.com/btc/multi-agent/apps/pi-web
+Environment=PI_WEB_NO_OPEN=1
+Environment=NODE_ENV=development
+ExecStart=/root/.nvm/versions/node/v24.13.0/bin/node ./node_modules/next/dist/bin/next dev -H 127.0.0.1 -p 30148
+Restart=always
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

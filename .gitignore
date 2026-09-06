@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.next/
+.run/
+.bin/
+data/
+*.log
+.env
