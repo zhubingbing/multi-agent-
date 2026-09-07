@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -87,7 +88,11 @@ func dispatchConversationPrompt(ctx context.Context, h *hub, store *Store, reque
 	if request.ExecutionMode == "sequential" && len(request.AgentIDs) > 1 {
 		dispatchAgentIDs = request.AgentIDs[:1]
 	}
-	accepted := h.dispatch("prompt", request.ConversationID, dispatchedMessage, dispatchAgentIDs, request.RunIDs)
+	workspaceCwd, err := store.WorkspaceCwdForConversation(ctx, request.ConversationID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return conversationDispatchResult{}, err
+	}
+	accepted := h.dispatch("prompt", request.ConversationID, dispatchedMessage, dispatchAgentIDs, request.RunIDs, workspaceCwd)
 	acceptedSet := make(map[string]struct{}, len(accepted))
 	for _, agentID := range accepted {
 		acceptedSet[agentID] = struct{}{}

@@ -6,8 +6,17 @@ export type AgentPresence = "available" | "working" | "waiting" | "offline" | st
 export interface ChannelSummary {
   id: string;
   title: string;
+  workspaceId: string;
   agentIds: string[];
   createdAt: number;
+}
+
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  cwd: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface AgentSummary {
@@ -95,6 +104,8 @@ export interface AgentConfigPatch {
 
 export interface AgentResponse { agent: AgentSummary }
 export interface ChannelListResponse { channels?: ChannelSummary[] }
+export interface WorkspaceListResponse { workspaces?: WorkspaceSummary[] }
+export interface WorkspaceResponse { workspace: WorkspaceSummary }
 export interface AgentListResponse { agents?: AgentSummary[] }
 export interface ActiveRuntimeRun {
   conversationId: string;

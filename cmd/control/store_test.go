@@ -3,11 +3,82 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestManagedWorkspaceDirectoryUsesServerRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("MULTI_AGENT_WORKSPACE_ROOT", root)
+	directory, err := managedWorkspaceDirectory("产品 研发/../", "workspace-1234567890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(root, directory)
+	if err != nil || strings.HasPrefix(relative, "..") {
+		t.Fatalf("directory escaped server root: %q, %v", directory, err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("managed directory was not created: %q, %v", directory, err)
+	}
+}
+
+func TestWorkspaceCRUDAndChannelAssignment(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	workspace := Workspace{ID: "workspace-a", Name: "产品研发", Cwd: "/projects/product", CreatedAt: 10, UpdatedAt: 10}
+	if err := store.CreateWorkspace(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateChannel(ctx, Channel{ID: "workspace-channel", Title: "需求分析", WorkspaceID: workspace.ID, AgentIDs: []string{"host-pi"}, CreatedAt: 20}); err != nil {
+		t.Fatal(err)
+	}
+	workspaces, err := store.ListWorkspaces(ctx)
+	if err != nil || len(workspaces) != 2 || workspaces[0].ID != defaultWorkspaceID {
+		t.Fatalf("unexpected workspaces: %#v, %v", workspaces, err)
+	}
+	channels, err := store.ListChannels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assigned *Channel
+	for index := range channels {
+		if channels[index].ID == "workspace-channel" {
+			assigned = &channels[index]
+		}
+	}
+	if assigned == nil || assigned.WorkspaceID != workspace.ID {
+		t.Fatalf("channel workspace not persisted: %#v", assigned)
+	}
+	updated, err := store.UpdateWorkspace(ctx, workspace.ID, "平台研发", "/projects/platform")
+	if err != nil || updated.Name != "平台研发" || updated.Cwd != "/projects/platform" {
+		t.Fatalf("unexpected update: %#v, %v", updated, err)
+	}
+	if err := store.DeleteWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	channels, err = store.ListChannels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, channel := range channels {
+		if channel.ID == "workspace-channel" {
+			t.Fatalf("deleted workspace task was retained: %#v", channel)
+		}
+	}
+	if err := store.DeleteWorkspace(ctx, defaultWorkspaceID); err == nil {
+		t.Fatal("default workspace was deleted")
+	}
+}
 
 func TestAgentMentionCreatesInboxAndAutomaticReplyRun(t *testing.T) {
 	ctx := context.Background()

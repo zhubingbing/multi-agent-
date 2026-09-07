@@ -14,9 +14,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"multi-agent/internal/automation"
 
@@ -476,7 +479,7 @@ func (h *hub) replaceSession(conversationID, agentID, provider, model, thinkingL
 	}) == nil
 }
 
-func (h *hub) dispatch(action, conversationID, message string, agentIDs []string, runIDs map[string]string) []string {
+func (h *hub) dispatch(action, conversationID, message string, agentIDs []string, runIDs map[string]string, workspaceCwd string) []string {
 	h.mu.Lock()
 	h.seq++
 	requestID := fmt.Sprintf("run-%d", h.seq)
@@ -515,7 +518,7 @@ func (h *hub) dispatch(action, conversationID, message string, agentIDs []string
 			ConversationID: conversationID,
 			AgentID:        target.agent.ID,
 			Message:        message,
-			Cwd:            firstNonEmpty(target.agent.DesiredCwd, target.agent.Cwd),
+			Cwd:            firstNonEmpty(workspaceCwd, target.agent.DesiredCwd, target.agent.Cwd),
 			Model:          configuredModel(target.agent),
 			ThinkingLevel:  target.agent.DesiredThinking,
 		}
@@ -575,7 +578,8 @@ func persistSessionState(ctx context.Context, store *Store, runtimeID string, ev
 
 func dispatchEmployeeRuns(ctx context.Context, h *hub, store *Store, runs []SequentialRun) {
 	for _, run := range runs {
-		accepted := h.dispatch("prompt", run.ConversationID, run.Message, []string{run.AgentID}, map[string]string{run.AgentID: run.RunID})
+		workspaceCwd, _ := store.WorkspaceCwdForConversation(ctx, run.ConversationID)
+		accepted := h.dispatch("prompt", run.ConversationID, run.Message, []string{run.AgentID}, map[string]string{run.AgentID: run.RunID}, workspaceCwd)
 		if len(accepted) != 1 {
 			message := "mentioned employee is offline or dispatch failed"
 			_ = store.AppendEvent(ctx, run.RunID, "agent_error", nil, message)
@@ -605,6 +609,48 @@ func newID(prefix string) string {
 		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
 	}
 	return prefix + "-" + hex.EncodeToString(value[:])
+}
+
+func managedWorkspaceDirectory(name, id string) (string, error) {
+	root := strings.TrimSpace(os.Getenv("MULTI_AGENT_WORKSPACE_ROOT"))
+	if root == "" {
+		workingDirectory, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(workingDirectory, "data", "workspaces")
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	var slug []rune
+	lastDash := false
+	for _, character := range strings.TrimSpace(name) {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) || character == '-' || character == '_' {
+			slug = append(slug, character)
+			lastDash = false
+		} else if !lastDash {
+			slug = append(slug, '-')
+			lastDash = true
+		}
+		if len(slug) >= 48 {
+			break
+		}
+	}
+	directoryName := strings.Trim(string(slug), "-_")
+	if directoryName == "" {
+		directoryName = "workspace"
+	}
+	suffix := id
+	if len(suffix) > 8 {
+		suffix = suffix[len(suffix)-8:]
+	}
+	directory := filepath.Join(root, directoryName+"-"+suffix)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return "", fmt.Errorf("create managed workspace directory: %w", err)
+	}
+	return directory, nil
 }
 
 func runtimeSkills(h *hub, runtimeID string) []runtimeSkillInfo {
@@ -1033,6 +1079,123 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 	})
+	mux.HandleFunc("/api/multi-agent/workspaces", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			workspaces, err := store.ListWorkspaces(r.Context())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": workspaces})
+		case http.MethodPost:
+			var input struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil {
+				http.Error(w, "invalid JSON", http.StatusBadRequest)
+				return
+			}
+			now := time.Now().UnixMilli()
+			workspace := Workspace{ID: newID("workspace"), Name: strings.TrimSpace(input.Name), CreatedAt: now, UpdatedAt: now}
+			if workspace.Name == "" {
+				http.Error(w, "workspace name is required", http.StatusBadRequest)
+				return
+			}
+			directory, err := managedWorkspaceDirectory(workspace.Name, workspace.ID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			workspace.Cwd = directory
+			if err := store.CreateWorkspace(r.Context(), workspace); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspace": workspace})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/multi-agent/workspaces/", func(w http.ResponseWriter, r *http.Request) {
+		workspaceID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/multi-agent/workspaces/"), "/")
+		if workspaceID == "" || strings.Contains(workspaceID, "/") {
+			http.Error(w, "invalid workspace id", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			workspace, err := store.GetWorkspace(r.Context(), workspaceID)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					http.Error(w, "workspace not found", http.StatusNotFound)
+				} else {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspace": workspace})
+		case http.MethodPatch:
+			var input struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil {
+				http.Error(w, "invalid JSON", http.StatusBadRequest)
+				return
+			}
+			current, err := store.GetWorkspace(r.Context(), workspaceID)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					http.Error(w, "workspace not found", http.StatusNotFound)
+				} else {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
+				return
+			}
+			workspace, err := store.UpdateWorkspace(r.Context(), workspaceID, input.Name, current.Cwd)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					http.Error(w, "workspace not found", http.StatusNotFound)
+				} else {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+				}
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspace": workspace})
+		case http.MethodDelete:
+			channels, listErr := store.ListChannels(r.Context())
+			if listErr != nil {
+				http.Error(w, listErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			deletedChannelIDs := []string{}
+			for _, channel := range channels {
+				if channel.WorkspaceID == workspaceID {
+					deletedChannelIDs = append(deletedChannelIDs, channel.ID)
+				}
+			}
+			if err := store.DeleteWorkspace(r.Context(), workspaceID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					http.Error(w, "workspace not found", http.StatusNotFound)
+				} else {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+				}
+				return
+			}
+			for _, channelID := range deletedChannelIDs {
+				if err := automationStore.ClearConversationReference(r.Context(), channelID); err != nil {
+					log.Printf("clear automation conversation reference channel=%s: %v", channelID, err)
+				}
+				h.dispatch("close", channelID, "", h.allAgentIDs(), nil, "")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": workspaceID, "deletedChannelIds": deletedChannelIDs})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 	mux.HandleFunc("/api/multi-agent/channels", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
@@ -1045,14 +1208,18 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]any{"channels": channels})
 		case http.MethodPost:
 			var input struct {
-				Title    string   `json:"title"`
-				AgentIDs []string `json:"agentIds"`
+				Title       string   `json:"title"`
+				WorkspaceID string   `json:"workspaceId"`
+				AgentIDs    []string `json:"agentIds"`
 			}
 			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil {
 				http.Error(w, "invalid JSON", http.StatusBadRequest)
 				return
 			}
-			channel := Channel{ID: newID("channel"), Title: strings.TrimSpace(input.Title), AgentIDs: input.AgentIDs, CreatedAt: time.Now().UnixMilli()}
+			channel := Channel{ID: newID("channel"), Title: strings.TrimSpace(input.Title), WorkspaceID: strings.TrimSpace(input.WorkspaceID), AgentIDs: input.AgentIDs, CreatedAt: time.Now().UnixMilli()}
+			if channel.WorkspaceID == "" {
+				channel.WorkspaceID = defaultWorkspaceID
+			}
 			if err := store.CreateChannel(r.Context(), channel); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -1130,7 +1297,7 @@ func main() {
 		if err := automationStore.ClearConversationReference(r.Context(), channelID); err != nil {
 			log.Printf("clear automation conversation reference channel=%s: %v", channelID, err)
 		}
-		closed := h.dispatch("close", channelID, "", h.allAgentIDs(), nil)
+		closed := h.dispatch("close", channelID, "", h.allAgentIDs(), nil, "")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"closedAgentIds": closed})
 	})
@@ -1188,7 +1355,7 @@ func main() {
 			}
 			return
 		}
-		closed := h.dispatch("close", threadID, "", h.allAgentIDs(), nil)
+		closed := h.dispatch("close", threadID, "", h.allAgentIDs(), nil, "")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"closedAgentIds": closed})
 	})
@@ -1458,7 +1625,8 @@ func main() {
 					if err != nil {
 						log.Printf("advance sequential turn run=%s: %v", event.RunID, err)
 					} else if ok {
-						accepted := h.dispatch("prompt", next.ConversationID, next.Message, []string{next.AgentID}, map[string]string{next.AgentID: next.RunID})
+						workspaceCwd, _ := store.WorkspaceCwdForConversation(context.Background(), next.ConversationID)
+						accepted := h.dispatch("prompt", next.ConversationID, next.Message, []string{next.AgentID}, map[string]string{next.AgentID: next.RunID}, workspaceCwd)
 						if len(accepted) != 1 {
 							message := "sequential Agent is offline or dispatch failed"
 							_ = store.AppendEvent(r.Context(), next.RunID, "agent_error", nil, message)
@@ -1529,7 +1697,8 @@ func main() {
 				}
 				continue
 			}
-			accepted := h.dispatch(command.Type, conversationID, command.Message, command.AgentIDs, command.RunIDs)
+			workspaceCwd, _ := store.WorkspaceCwdForConversation(r.Context(), conversationID)
+			accepted := h.dispatch(command.Type, conversationID, command.Message, command.AgentIDs, command.RunIDs, workspaceCwd)
 			_ = browser.write(map[string]any{"type": "dispatched", "turnId": command.TurnID, "agentIds": accepted})
 		}
 	})

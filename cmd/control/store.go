@@ -17,10 +17,21 @@ import (
 )
 
 type Channel struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	AgentIDs  []string `json:"agentIds"`
-	CreatedAt int64    `json:"createdAt"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	WorkspaceID string   `json:"workspaceId"`
+	AgentIDs    []string `json:"agentIds"`
+	CreatedAt   int64    `json:"createdAt"`
+}
+
+const defaultWorkspaceID = "workspace-default"
+
+type Workspace struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Cwd       string `json:"cwd"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 type ParticipantCursor struct {
@@ -228,9 +239,18 @@ func (s *Store) initialize(ctx context.Context) error {
 			status TEXT NOT NULL DEFAULT 'offline',
 			updated_at INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS workspaces (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			cwd TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			deleted_at INTEGER
+		)`,
 		`CREATE TABLE IF NOT EXISTS channels (
 			id TEXT PRIMARY KEY,
 			title TEXT NOT NULL,
+			workspace_id TEXT NOT NULL DEFAULT 'workspace-default',
 			created_at INTEGER NOT NULL,
 			deleted_at INTEGER
 		)`,
@@ -371,10 +391,50 @@ func (s *Store) initialize(ctx context.Context) error {
 	if err := s.ensureTurnColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureWorkspaceSchema(ctx); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE agents SET status='offline'`); err != nil {
 		return fmt.Errorf("reset persisted agent presence: %w", err)
 	}
+	if err := s.seedDefaultWorkspace(ctx); err != nil {
+		return err
+	}
 	return s.seedDefaultChannels(ctx)
+}
+
+func (s *Store) ensureWorkspaceSchema(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(channels)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		found = found || name == "workspace_id"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !found {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE channels ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'workspace-default'`); err != nil {
+			return fmt.Errorf("add channel workspace_id: %w", err)
+		}
+	}
+	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS channels_workspace_created ON channels(workspace_id,created_at,id)`)
+	return err
+}
+
+func (s *Store) seedDefaultWorkspace(ctx context.Context) error {
+	now := time.Now().UnixMilli()
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO workspaces(id,name,cwd,created_at,updated_at) VALUES(?,?,?,?,?)`, defaultWorkspaceID, "默认工作空间", "", now, now)
+	return err
 }
 
 func (s *Store) initializeConversationVersions(ctx context.Context) error {
@@ -1033,6 +1093,115 @@ func (s *Store) seedDefaultChannels(ctx context.Context) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) CreateWorkspace(ctx context.Context, workspace Workspace) error {
+	workspace.ID = strings.TrimSpace(workspace.ID)
+	workspace.Name = strings.TrimSpace(workspace.Name)
+	workspace.Cwd = strings.TrimSpace(workspace.Cwd)
+	if workspace.ID == "" || workspace.Name == "" {
+		return errors.New("workspace id and name are required")
+	}
+	if workspace.CreatedAt == 0 {
+		workspace.CreatedAt = time.Now().UnixMilli()
+	}
+	if workspace.UpdatedAt == 0 {
+		workspace.UpdatedAt = workspace.CreatedAt
+	}
+	var duplicate int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workspaces WHERE deleted_at IS NULL AND lower(name)=lower(?)`, workspace.Name).Scan(&duplicate); err != nil {
+		return err
+	}
+	if duplicate > 0 {
+		return errors.New("workspace name already exists")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces(id,name,cwd,created_at,updated_at) VALUES(?,?,?,?,?)`, workspace.ID, workspace.Name, workspace.Cwd, workspace.CreatedAt, workspace.UpdatedAt)
+	return err
+}
+
+func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,cwd,created_at,updated_at FROM workspaces WHERE deleted_at IS NULL ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, created_at, id`, defaultWorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Workspace{}
+	for rows.Next() {
+		var workspace Workspace
+		if err := rows.Scan(&workspace.ID, &workspace.Name, &workspace.Cwd, &workspace.CreatedAt, &workspace.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, workspace)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) GetWorkspace(ctx context.Context, id string) (Workspace, error) {
+	var workspace Workspace
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,cwd,created_at,updated_at FROM workspaces WHERE id=? AND deleted_at IS NULL`, strings.TrimSpace(id)).Scan(&workspace.ID, &workspace.Name, &workspace.Cwd, &workspace.CreatedAt, &workspace.UpdatedAt)
+	return workspace, err
+}
+
+func (s *Store) WorkspaceCwdForConversation(ctx context.Context, conversationID string) (string, error) {
+	var cwd string
+	err := s.db.QueryRowContext(ctx, `SELECT w.cwd FROM workspaces w JOIN channels c ON c.workspace_id=w.id
+		WHERE c.deleted_at IS NULL AND w.deleted_at IS NULL AND c.id=COALESCE(
+			(SELECT channel_id FROM threads WHERE id=? AND deleted_at IS NULL), ?
+		)`, conversationID, conversationID).Scan(&cwd)
+	return cwd, err
+}
+
+func (s *Store) UpdateWorkspace(ctx context.Context, id, name, cwd string) (Workspace, error) {
+	id, name, cwd = strings.TrimSpace(id), strings.TrimSpace(name), strings.TrimSpace(cwd)
+	if id == "" || name == "" {
+		return Workspace{}, errors.New("workspace id and name are required")
+	}
+	var duplicate int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workspaces WHERE id<>? AND deleted_at IS NULL AND lower(name)=lower(?)`, id, name).Scan(&duplicate); err != nil {
+		return Workspace{}, err
+	}
+	if duplicate > 0 {
+		return Workspace{}, errors.New("workspace name already exists")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE workspaces SET name=?,cwd=?,updated_at=? WHERE id=? AND deleted_at IS NULL`, name, cwd, time.Now().UnixMilli(), id)
+	if err != nil {
+		return Workspace{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return Workspace{}, err
+	}
+	if changed == 0 {
+		return Workspace{}, sql.ErrNoRows
+	}
+	return s.GetWorkspace(ctx, id)
+}
+
+func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == defaultWorkspaceID {
+		return errors.New("default workspace cannot be deleted")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE workspaces SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at IS NULL`, time.Now().UnixMilli(), time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channels SET deleted_at=? WHERE workspace_id=? AND deleted_at IS NULL`, time.Now().UnixMilli(), id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) CreateChannel(ctx context.Context, channel Channel) error {
 	if channel.ID == "" || channel.Title == "" || len(channel.AgentIDs) == 0 {
 		return errors.New("channel id, title and at least one agent are required")
@@ -1040,13 +1209,25 @@ func (s *Store) CreateChannel(ctx context.Context, channel Channel) error {
 	if channel.CreatedAt == 0 {
 		channel.CreatedAt = time.Now().UnixMilli()
 	}
+	if strings.TrimSpace(channel.WorkspaceID) == "" {
+		channel.WorkspaceID = defaultWorkspaceID
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO channels(id, title, created_at) VALUES (?, ?, ?)`, channel.ID, channel.Title, channel.CreatedAt); err != nil {
+	insertResult, err := tx.ExecContext(ctx, `INSERT INTO channels(id, title, workspace_id, created_at)
+		SELECT ?,?,?,? FROM workspaces WHERE id=? AND deleted_at IS NULL`, channel.ID, channel.Title, channel.WorkspaceID, channel.CreatedAt, channel.WorkspaceID)
+	if err != nil {
 		return err
+	}
+	inserted, err := insertResult.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted == 0 {
+		return errors.New("workspace not found")
 	}
 	seen := make(map[string]struct{}, len(channel.AgentIDs))
 	for _, agentID := range channel.AgentIDs {
@@ -1066,7 +1247,7 @@ func (s *Store) CreateChannel(ctx context.Context, channel Channel) error {
 
 func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.id, c.title, c.created_at, ca.agent_id
+		SELECT c.id, c.title, c.workspace_id, c.created_at, ca.agent_id
 		FROM channels c JOIN channel_agents ca ON ca.channel_id = c.id
 		WHERE c.deleted_at IS NULL
 		ORDER BY c.created_at DESC, c.id, ca.rowid`)
@@ -1077,16 +1258,16 @@ func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
 	var result []Channel
 	positions := map[string]int{}
 	for rows.Next() {
-		var id, title, agentID string
+		var id, title, workspaceID, agentID string
 		var createdAt int64
-		if err := rows.Scan(&id, &title, &createdAt, &agentID); err != nil {
+		if err := rows.Scan(&id, &title, &workspaceID, &createdAt, &agentID); err != nil {
 			return nil, err
 		}
 		position, exists := positions[id]
 		if !exists {
 			position = len(result)
 			positions[id] = position
-			result = append(result, Channel{ID: id, Title: title, CreatedAt: createdAt, AgentIDs: []string{}})
+			result = append(result, Channel{ID: id, Title: title, WorkspaceID: workspaceID, CreatedAt: createdAt, AgentIDs: []string{}})
 		}
 		result[position].AgentIDs = append(result[position].AgentIDs, agentID)
 	}
@@ -1215,7 +1396,7 @@ func (s *Store) PromptForConversation(ctx context.Context, conversationID, turnI
 
 func (s *Store) ListEmployeeInbox(ctx context.Context, agentID string) ([]EmployeeInbox, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,recipient_agent_id,source_message_id,state,reason,created_at,COALESCE(consumed_at,0)
-		FROM employee_inbox WHERE recipient_agent_id=? ORDER BY created_at,id`, agentID)
+		FROM employee_inbox WHERE recipient_agent_id=? ORDER BY created_at,rowid`, agentID)
 	if err != nil {
 		return nil, err
 	}

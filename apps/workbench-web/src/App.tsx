@@ -21,6 +21,9 @@ import type {
   ModelSummary,
   RuntimeListResponse,
   RuntimeSummary,
+  WorkspaceListResponse,
+  WorkspaceResponse,
+  WorkspaceSummary,
   AgentConfigPatch,
 } from "./contracts/control-api";
 
@@ -74,6 +77,7 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("models");
   const [overlay, setOverlay] = useState<WorkbenchOverlay | null>(null);
   const [channels, setChannels] = useState<ChannelSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [runtimes, setRuntimes] = useState<RuntimeSummary[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -96,9 +100,22 @@ export function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
   const [createAgents, setCreateAgents] = useState<string[]>([]);
+  const [createWorkspaceId, setCreateWorkspaceId] = useState("workspace-default");
+  const [workspaceManagerOpen, setWorkspaceManagerOpen] = useState(false);
+  const [workspaceCreateOpen, setWorkspaceCreateOpen] = useState(false);
+  const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = useState<string[]>(() => { try { const raw = localStorage.getItem("workbench-collapsed-workspaces"); return raw ? JSON.parse(raw) as string[] : []; } catch { return []; } });
+  const [workspaceEditor, setWorkspaceEditor] = useState<WorkspaceSummary | null | undefined>(undefined);
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [workspaceCwd, setWorkspaceCwd] = useState("");
+  const [savingWorkspace, setSavingWorkspace] = useState(false);
+  const [deletingWorkspaceId, setDeletingWorkspaceId] = useState("");
+  const [deleteWorkspaceTarget, setDeleteWorkspaceTarget] = useState<WorkspaceSummary | null>(null);
+  const [workspaceMenuId, setWorkspaceMenuId] = useState("");
   const [taskMenuId, setTaskMenuId] = useState("");
-  const [deleteTaskTarget, setDeleteTaskTarget] = useState<ChannelSummary | null>(null);
+  const [deleteTaskTargets, setDeleteTaskTargets] = useState<ChannelSummary[]>([]);
   const [deletingTask, setDeletingTask] = useState(false);
+  const [manageTasks, setManageTasks] = useState(false);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [chatConfigAgentId, setChatConfigAgentId] = useState("");
   const [modelPickerAgentId, setModelPickerAgentId] = useState("");
   const [modelConfigAgentId, setModelConfigAgentId] = useState("");
@@ -113,17 +130,20 @@ export function App() {
 
   const loadShell = useCallback(async () => {
     try {
-      const [channelResponse, agentResponse, runtimeResponse] = await Promise.all([
+      const [channelResponse, workspaceResponse, agentResponse, runtimeResponse] = await Promise.all([
         fetch("/api/multi-agent/channels", { cache: "no-store" }),
+        fetch("/api/multi-agent/workspaces", { cache: "no-store" }),
         fetch("/api/multi-agent/agents", { cache: "no-store" }),
         fetch("/api/multi-agent/runtimes", { cache: "no-store" }),
       ]);
       if (!channelResponse.ok) throw new Error("Control Server 尚未启动");
       const channelData = await channelResponse.json() as ChannelListResponse;
+      const workspaceData = await workspaceResponse.json() as WorkspaceListResponse;
       const agentData = await agentResponse.json() as AgentListResponse;
       const runtimeData = await runtimeResponse.json() as RuntimeListResponse;
       const nextChannels = channelData.channels ?? [];
       setChannels(nextChannels);
+      setWorkspaces(workspaceData.workspaces ?? []);
       setAgents(agentData.agents ?? []);
       setActiveAgentId((current) => current || (agentData.agents ?? [])[0]?.id || "");
       setDraftAgentId((current) => current || (agentData.agents ?? []).find((agent) => agent.online)?.id || (agentData.agents ?? [])[0]?.id || "");
@@ -166,7 +186,17 @@ export function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!workspaceMenuId) return;
+    const close = (event: MouseEvent) => { if (!(event.target instanceof Element) || !event.target.closest(".workspace-menu") && !event.target.closest(".workspace-name")) setWorkspaceMenuId(""); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [workspaceMenuId]);
   useEffect(() => { void loadShell(); }, [loadShell]);
+  useEffect(() => { try { localStorage.setItem("workbench-collapsed-workspaces", JSON.stringify(collapsedWorkspaceIds)); } catch { /* ignore */ } }, [collapsedWorkspaceIds]);
+  const toggleWorkspaceCollapse = (id: string) => setCollapsedWorkspaceIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+  const allCollapsed = workspaces.length > 0 && workspaces.every((workspace) => collapsedWorkspaceIds.includes(workspace.id));
+  const toggleAllWorkspaces = () => setCollapsedWorkspaceIds(allCollapsed ? [] : workspaces.map((workspace) => workspace.id));
   useEffect(() => {
     if (!taskMenuId) return;
     const close = (event: MouseEvent) => { if (!(event.target instanceof Element) || !event.target.closest(".task-list-item")) setTaskMenuId(""); };
@@ -237,31 +267,97 @@ export function App() {
     setOverlay(null);
     history.replaceState(null, "", "/conversations");
   };
-  const openCreate = () => { setCreateTitle(""); setCreateAgents(agents.find((agent) => agent.online)?.id ? [agents.find((agent) => agent.online)!.id] : []); setCreateOpen(true); };
+  const openCreate = (workspaceId = workspaces[0]?.id || "workspace-default") => { setCreateTitle(""); setCreateWorkspaceId(workspaceId); setCreateAgents(agents.find((agent) => agent.online)?.id ? [agents.find((agent) => agent.online)!.id] : []); setCreateOpen(true); };
+
+  const editWorkspace = (workspace?: WorkspaceSummary) => {
+    setWorkspaceEditor(workspace ?? null);
+    setWorkspaceName(workspace?.name ?? "");
+    setWorkspaceCwd(workspace?.cwd ?? "");
+  };
+
+  const beginCreateWorkspace = () => {
+    setWorkspaceEditor(null); setWorkspaceName(""); setWorkspaceCwd(""); setWorkspaceCreateOpen(true);
+  };
+
+  const saveWorkspace = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!workspaceName.trim() || savingWorkspace) return;
+    setSavingWorkspace(true); setError("");
+    try {
+      const editing = Boolean(workspaceEditor);
+      const response = await fetch(editing ? `/api/multi-agent/workspaces/${encodeURIComponent(workspaceEditor!.id)}` : "/api/multi-agent/workspaces", {
+        method: editing ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: workspaceName.trim(), cwd: workspaceCwd.trim() }),
+      });
+      if (!response.ok) throw new Error((await response.text()).trim() || "保存工作空间失败");
+      const { workspace } = await response.json() as WorkspaceResponse;
+      setWorkspaces((current) => editing ? current.map((item) => item.id === workspace.id ? workspace : item) : [...current, workspace]);
+      setWorkspaceEditor(undefined); setWorkspaceName(""); setWorkspaceCwd("");
+      if (!editing) setWorkspaceCreateOpen(false);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setSavingWorkspace(false); }
+  };
+
+  const deleteWorkspace = async (workspace: WorkspaceSummary) => {
+    if (workspace.id === "workspace-default" || deletingWorkspaceId) return;
+    setDeletingWorkspaceId(workspace.id); setError("");
+    try {
+      const response = await fetch(`/api/multi-agent/workspaces/${encodeURIComponent(workspace.id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error((await response.text()).trim() || "删除工作空间失败");
+      setWorkspaces((current) => current.filter((item) => item.id !== workspace.id));
+      const removedChannels = channels.filter((channel) => channel.workspaceId === workspace.id);
+      const removedIDs = new Set(removedChannels.map((channel) => channel.id));
+      const remaining = channels.filter((channel) => !removedIDs.has(channel.id));
+      setChannels(remaining);
+      setSelectedTaskIds((current) => current.filter((id) => !removedIDs.has(id)));
+      if (removedIDs.has(activeId)) {
+        setTurns([]); setBindings([]); setRunning([]); setActiveId(remaining[0]?.id ?? "");
+      }
+      setDeleteWorkspaceTarget(null); setWorkspaceEditor(undefined);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setDeletingWorkspaceId(""); }
+  };
 
   const createTask = async (event: FormEvent) => {
     event.preventDefault();
-    const response = await fetch("/api/multi-agent/channels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: createTitle.trim(), agentIds: createAgents }) });
+    const response = await fetch("/api/multi-agent/channels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: createTitle.trim(), workspaceId: createWorkspaceId, agentIds: createAgents }) });
     if (!response.ok) { setError(await response.text()); return; }
     const { channel } = await response.json() as CreateChannelResponse;
     setChannels((current) => [channel, ...current]); setActiveId(channel.id); setCreateOpen(false);
   };
 
   const deleteTask = async () => {
-    if (!deleteTaskTarget || deletingTask) return;
+    if (!deleteTaskTargets.length || deletingTask) return;
     setDeletingTask(true);
     try {
-      const response = await fetch(`/api/multi-agent/channels/${encodeURIComponent(deleteTaskTarget.id)}`, { method: "DELETE" });
-      if (!response.ok) throw new Error((await response.text()).trim() || "删除任务失败");
-      const remaining = channels.filter((channel) => channel.id !== deleteTaskTarget.id);
-      setChannels(remaining);
-      if (activeId === deleteTaskTarget.id) {
-        setTurns([]); setBindings([]); setRunning([]); setActiveId(remaining[0]?.id ?? "");
-        history.replaceState(null, "", remaining[0] ? `/conversations?conversation=${encodeURIComponent(remaining[0].id)}` : "/conversations");
+      const results = await Promise.all(deleteTaskTargets.map(async (target) => {
+        try {
+          const response = await fetch(`/api/multi-agent/channels/${encodeURIComponent(target.id)}`, { method: "DELETE" });
+          if (!response.ok) throw new Error((await response.text()).trim() || `删除任务失败（${target.title}）`);
+          return { id: target.id, ok: true as const };
+        } catch (reason) {
+          return { id: target.id, ok: false as const, error: reason instanceof Error ? reason.message : String(reason) };
+        }
+      }));
+      const removed = new Set(results.filter((entry) => entry.ok).map((entry) => entry.id));
+      const failures = results.filter((entry) => !entry.ok);
+      if (removed.size > 0) {
+        const remaining = channels.filter((channel) => !removed.has(channel.id));
+        setChannels(remaining);
+        setSelectedTaskIds((current) => current.filter((id) => !removed.has(id)));
+        if (activeId && removed.has(activeId)) {
+          setTurns([]); setBindings([]); setRunning([]); setActiveId(remaining[0]?.id ?? "");
+          history.replaceState(null, "", remaining[0] ? `/conversations?conversation=${encodeURIComponent(remaining[0].id)}` : "/conversations");
+        }
       }
-      setDeleteTaskTarget(null);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setDeletingTask(false); }
+      if (failures.length > 0) {
+        setError(failures[0].error || "部分任务删除失败");
+      } else {
+        setDeleteTaskTargets([]);
+        if (manageTasks) setManageTasks(false);
+      }
+    } finally { setDeletingTask(false); }
   };
 
   const dispatchPrompt = (socket: WebSocket, message: string, targets: string[], requestedMode: "sequential" | "parallel") => {
@@ -333,14 +429,14 @@ export function App() {
     <div className={`shell ${view === "settings" && settingsSection === "runtimes" ? "module-fullscreen" : ""}`}>
       <nav className="rail"><Rail icon="tasks" label="任务" active={view === "tasks"} onClick={() => { setView("tasks"); setOverlay(null); }}/><Rail icon="agents" label="数字员工" active={!overlay && view === "agents"} onClick={() => { setView("agents"); setOverlay(null); }}/><Rail icon="message" label="消息"/><span/><Rail icon="settings" label="设置" active={!overlay && view === "settings"} onClick={() => { setView("settings"); setOverlay(null); }}/><button className="profile">U</button></nav>
       <aside className="sidebar">
-        {view === "tasks" ? <><div className="primary-nav"><button className={`new ${!overlay ? "active" : ""}`} onClick={beginDraftTask}><Icon name="plus" size={16}/>新任务</button><button className={overlay === "apps" ? "active" : ""} onClick={() => openOverlay("apps")}><Icon name="apps" size={16}/>应用中心</button><button className={overlay === "automation" ? "active" : ""} onClick={() => openOverlay("automation")}><Icon name="automation" size={16}/>自动化</button><button><Icon name="import" size={16}/>导入数据</button></div><div className="side-heading">工作空间 <small>({channels.length ? 1 : 0})</small><button onClick={openCreate}>+</button></div><div className="search"><Icon name="search" size={14}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务"/></div><div className="tasks"><div className="workspace"><Icon name="folder" size={16}/>默认工作空间 <small>{channels.length}</small></div>{filteredChannels.map((channel) => <div className={`task-list-item ${channel.id === activeId && !overlay ? "active" : ""}`} key={channel.id}><button className="task-list-select" onClick={() => selectTask(channel.id)}>{channel.title}</button><button className="task-list-more" aria-label={`${channel.title}的更多操作`} aria-expanded={taskMenuId === channel.id} onClick={() => setTaskMenuId((current) => current === channel.id ? "" : channel.id)}>•••</button>{taskMenuId === channel.id && <div className="task-list-menu"><button type="button" onClick={() => { selectTask(channel.id); setTaskMenuId(""); }}>打开</button><i/><button type="button" className="danger" onClick={() => { setDeleteTaskTarget(channel); setTaskMenuId(""); }}>删除任务</button></div>}</div>)}</div></> : view === "agents" ? <AgentSidebar agents={agents} activeAgentId={activeAgentId} onSelect={setActiveAgentId}/> : <ModuleSidebar view={view} settingsSection={settingsSection} onSettingsSection={setSettingsSection}/>}
+        {view === "tasks" ? <><div className="primary-nav"><button className={`new ${!overlay ? "active" : ""}`} onClick={beginDraftTask}><Icon name="plus" size={16}/>新任务</button><button className={overlay === "apps" ? "active" : ""} onClick={() => openOverlay("apps")}><Icon name="apps" size={16}/>应用中心</button><button className={overlay === "automation" ? "active" : ""} onClick={() => openOverlay("automation")}><Icon name="automation" size={16}/>自动化</button><button><Icon name="import" size={16}/>导入数据</button></div><div className="side-heading">工作空间 <small>({workspaces.length})</small><button className="side-heading-icon" onClick={toggleAllWorkspaces} title={allCollapsed ? "展开全部" : "折叠全部"} aria-label={allCollapsed ? "展开全部工作空间" : "折叠全部工作空间"}>{allCollapsed ? "˅" : "˄"}</button><button className="side-heading-icon" disabled title="排序即将开放" aria-label="排序">⇅</button><button onClick={beginCreateWorkspace} title="新建工作空间">+</button></div>{channels.length > 0 && <button type="button" className="task-manage-toggle" onClick={() => { setManageTasks((value) => !value); setSelectedTaskIds([]); setTaskMenuId(""); }}>{manageTasks ? "完成任务管理" : "批量管理任务"}</button>}{manageTasks && <div className="task-bulk-bar"><label><input type="checkbox" checked={selectedTaskIds.length > 0 && selectedTaskIds.length === filteredChannels.length} ref={(node) => { if (node) node.indeterminate = selectedTaskIds.length > 0 && selectedTaskIds.length < filteredChannels.length; }} onChange={() => setSelectedTaskIds(selectedTaskIds.length === filteredChannels.length ? [] : filteredChannels.map((channel) => channel.id))}/><span>{selectedTaskIds.length ? `已选 ${selectedTaskIds.length}` : "全选"}</span></label><button type="button" className="danger" disabled={!selectedTaskIds.length} onClick={() => setDeleteTaskTargets(channels.filter((channel) => selectedTaskIds.includes(channel.id)))}>删除所选</button></div>}<div className="search"><Icon name="search" size={14}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务"/></div><div className="tasks">{workspaces.map((workspace) => { const workspaceChannels = filteredChannels.filter((channel) => channel.workspaceId === workspace.id); const collapsed = collapsedWorkspaceIds.includes(workspace.id); return <section className={`workspace-group ${collapsed ? "collapsed" : ""}`} key={workspace.id}><div className="workspace"><button type="button" className="workspace-chevron-btn" onClick={() => toggleWorkspaceCollapse(workspace.id)} aria-expanded={!collapsed} aria-label={collapsed ? `展开${workspace.name}` : `折叠${workspace.name}`}><i className={`workspace-chevron ${collapsed ? "collapsed" : ""}`}>›</i></button><button type="button" className="workspace-name" aria-expanded={workspaceMenuId === workspace.id} onClick={() => setWorkspaceMenuId((current) => current === workspace.id ? "" : workspace.id)}><Icon name="folder" size={16}/><span title={workspace.cwd || "未设置工作目录"}>{workspace.name}</span><small>{workspaceChannels.length}</small></button><button type="button" className="workspace-add-btn" onClick={() => openCreate(workspace.id)} title={`在${workspace.name}中新建任务`} aria-label={`在${workspace.name}中新建任务`}>+</button>{workspaceMenuId === workspace.id && <div className="workspace-menu"><button type="button" onClick={() => { if (collapsed) toggleWorkspaceCollapse(workspace.id); setWorkspaceMenuId(""); }}>{collapsed ? "展开" : "折叠"}</button><button type="button" onClick={() => { editWorkspace(workspace); setWorkspaceManagerOpen(true); setWorkspaceMenuId(""); }}>编辑</button>{workspace.id !== "workspace-default" && <><i/><button type="button" className="danger" disabled={deletingWorkspaceId === workspace.id} onClick={() => { void deleteWorkspace(workspace); setWorkspaceMenuId(""); }}>{deletingWorkspaceId === workspace.id ? "删除中…" : "删除工作空间"}</button></>}</div>}</div>{!collapsed && workspaceChannels.map((channel) => <div className={`task-list-item ${channel.id === activeId && !overlay && !manageTasks ? "active" : ""} ${manageTasks ? "manage" : ""} ${manageTasks && selectedTaskIds.includes(channel.id) ? "picked" : ""}`} key={channel.id}>{manageTasks && <input type="checkbox" className="task-list-check" checked={selectedTaskIds.includes(channel.id)} onChange={() => setSelectedTaskIds((current) => current.includes(channel.id) ? current.filter((id) => id !== channel.id) : [...current, channel.id])}/>}<button className="task-list-select" onClick={() => manageTasks ? setSelectedTaskIds((current) => current.includes(channel.id) ? current.filter((id) => id !== channel.id) : [...current, channel.id]) : selectTask(channel.id)}>{channel.title}</button>{!manageTasks && <><button className="task-list-more" aria-label={`${channel.title}的更多操作`} aria-expanded={taskMenuId === channel.id} onClick={() => setTaskMenuId((current) => current === channel.id ? "" : channel.id)}>•••</button>{taskMenuId === channel.id && <div className="task-list-menu"><button type="button" onClick={() => { selectTask(channel.id); setTaskMenuId(""); }}>打开</button><i/><button type="button" className="danger" onClick={() => { setDeleteTaskTargets([channel]); setTaskMenuId(""); }}>删除任务</button></div>}</>}</div>)}</section>; })}</div></> : view === "agents" ? <AgentSidebar agents={agents} activeAgentId={activeAgentId} onSelect={setActiveAgentId}/> : <ModuleSidebar view={view} settingsSection={settingsSection} onSettingsSection={setSettingsSection}/>}
       </aside>
       <main className="main">
         {error && <div className="app-error">{error}<button onClick={() => setError("")}>×</button></div>}
         {view === "tasks" ? active ? <div className={`task-layout mode-${mode}`}>
           <section className="conversation"><TaskHeader title={active.title}/><div className="agent-strip">{participants.map((agent) => <button key={agent.id} disabled={!agent.online} className={selectedAgents.includes(agent.id) ? "selected" : ""} onClick={() => setSelectedAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span>{agent.name}</span><i>{running.includes(agent.id) ? "运行中" : agent.online ? "可用" : "离线"}</i></button>)}{selectedAgents.length > 1 && <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "sequential" | "parallel")}><option value="sequential">顺序协作</option><option value="parallel">并行协作</option></select>}</div><ConversationTimeline conversationId={activeId} turns={turns} agents={agents} onEdit={(text) => setComposerPrefill(text)} onReply={(turnId, messageId, text) => setReplyTarget({ turnId, messageId, text })} onControl={(agentId, type, message) => sendControl(agentId, type, message)}/><ChatComposer draftKey={activeId} mentions={participants.map((agent) => ({ id: agent.id, label: agent.name, description: `${agent.provider} · ${agent.runtime}`, online: agent.online }))} selectedLabel={participants.find((agent) => selectedAgents.includes(agent.id))?.name || "选择数字员工"} modelLabel={bindings.find((binding) => selectedAgents.includes(binding.agentId))?.effectiveModel || participants.find((agent) => selectedAgents.includes(agent.id))?.desiredModel || "默认模型"} streaming={running.length > 0} connected={connected} initialValue={composerPrefill} reply={replyTarget?.text} onCancelReply={() => setReplyTarget(null)} onSend={sendMessage} onAbort={() => sendControl(null, "abort")} onControl={(type, message) => sendControl(null, type, message)} onAgentSettings={() => setChatConfigAgentId(selectedAgents[0] || participants[0]?.id || "")} onModelSettings={() => setModelPickerAgentId(selectedAgents[0] || participants[0]?.id || "")}/></section>
           <TaskCanvas tab={canvasTab} onTab={setCanvasTab} active={active} agents={participants} runtimes={runtimes} bindings={bindings} turns={turns} focusedRunId={focusedRunId} mode={mode} onMode={chooseMode}/>
-        </div> : <DraftTaskHome agents={agents} selectedAgentId={draftAgentId} onSelectAgent={setDraftAgentId} draft={draft} onDraft={setDraft} onSend={sendDraftTask} sending={creatingFromDraft}/> : <ModulePage view={view} settingsSection={settingsSection} onSettingsSection={setSettingsSection} agents={agents} runtimes={runtimes} channels={channels} activeAgentId={activeAgentId} onChooseModel={setModelPickerAgentId} onRuntimeUpdated={(updated) => setRuntimes((current) => current.map((runtime) => runtime.id === updated.id ? updated : runtime))} onAgentUpdated={(updated) => setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent))}/>}
+        </div> : <DraftTaskHome agents={agents} selectedAgentId={draftAgentId} onSelectAgent={setDraftAgentId} draft={draft} onDraft={setDraft} onSend={sendDraftTask} sending={creatingFromDraft} onChooseModel={(id) => setModelPickerAgentId(id)}/> : <ModulePage view={view} settingsSection={settingsSection} onSettingsSection={setSettingsSection} agents={agents} runtimes={runtimes} channels={channels} activeAgentId={activeAgentId} onChooseModel={setModelPickerAgentId} onRuntimeUpdated={(updated) => setRuntimes((current) => current.map((runtime) => runtime.id === updated.id ? updated : runtime))} onAgentUpdated={(updated) => setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent))}/>}
         {overlay && <section className="workspace-overlay" aria-label={overlay === "automation" ? "自动化" : "应用中心"}>
           <header className="workspace-overlay-header"><span><Icon name={overlay}/><b>{overlay === "automation" ? "自动化" : "应用中心"}</b><small>保留当前工作，不离开此页面</small></span><button type="button" onClick={() => setOverlay(null)} aria-label="关闭">×</button></header>
           <div className="workspace-overlay-body">{overlay === "automation" ? <AutomationPage agents={agents} runtimes={runtimes} onOpenConversation={openAutomationTask}/> : <Catalog/>}</div>
@@ -350,8 +446,11 @@ export function App() {
     {modelConfigAgentId && agents.find((agent) => agent.id === modelConfigAgentId) && <ModelConfigPanel agent={agents.find((agent) => agent.id === modelConfigAgentId)!} onClose={() => setModelConfigAgentId("")} onSaved={() => setModelPickerAgentId(modelConfigAgentId)}/>}
     {modelPickerAgentId && <ChatModelPicker agent={agents.find((agent) => agent.id === modelPickerAgentId)} binding={view === "tasks" ? bindings.find((binding) => binding.agentId === modelPickerAgentId) : undefined} conversationIds={view === "tasks" ? [activeId].filter(Boolean) : []} hasActiveRun={running.includes(modelPickerAgentId)} onConfigure={() => { setModelConfigAgentId(modelPickerAgentId); setModelPickerAgentId(""); }} onClose={() => setModelPickerAgentId("")}/>}
     {chatConfigAgentId && <ChatAgentSettings agent={agents.find((agent) => agent.id === chatConfigAgentId)} agents={participants} binding={bindings.find((binding) => binding.agentId === chatConfigAgentId)} conversationId={activeId} hasActiveRun={running.includes(chatConfigAgentId)} onSelectAgent={(id) => { setChatConfigAgentId(id); setSelectedAgents([id]); }} onClose={() => setChatConfigAgentId("")} onSaved={(updated) => setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent))}/>}
-    {deleteTaskTarget && <div className="backdrop task-delete-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !deletingTask && setDeleteTaskTarget(null)}><div className="task-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="task-delete-title"><span>!</span><h3 id="task-delete-title">删除任务“{deleteTaskTarget.title}”？</h3><p>任务中的对话、消息和运行信息会一起删除，此操作无法撤销。</p><footer><button type="button" disabled={deletingTask} onClick={() => setDeleteTaskTarget(null)}>取消</button><button type="button" className="danger" disabled={deletingTask} onClick={() => void deleteTask()}>{deletingTask ? "删除中…" : "确认删除"}</button></footer></div></div>}
-    {createOpen && <div className="backdrop" onMouseDown={(event) => event.target === event.currentTarget && setCreateOpen(false)}><form className="dialog" onSubmit={createTask}><header><span><Icon name="plus"/></span><div><h2>新建任务</h2><p>选择工作空间和数字员工，开始一项可持续推进的工作。</p></div><button type="button" onClick={() => setCreateOpen(false)}>×</button></header><label>任务名称</label><input autoFocus value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} placeholder="例如:梳理产品方案并输出执行计划"/><h3>选择数字员工 <small>{createAgents.length} 个已选择</small></h3><div className="agent-picker">{agents.map((agent) => <button type="button" disabled={!agent.online} className={createAgents.includes(agent.id) ? "picked" : ""} key={agent.id} onClick={() => setCreateAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.description || `${agent.provider} · ${agent.runtime}`}</small></span><i>{createAgents.includes(agent.id) ? "✓" : ""}</i></button>)}</div><div className="workspace-choice"><Icon name="folder"/><span><b>默认工作空间</b><small>使用数字员工配置的工作目录</small></span></div><footer><button type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="submit" disabled={!createTitle.trim() || !createAgents.length}><Icon name="plus" size={15}/>创建任务</button></footer></form></div>}
+    {workspaceCreateOpen && <div className="backdrop workspace-create-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !savingWorkspace && setWorkspaceCreateOpen(false)}><form className="workspace-create-dialog" onSubmit={saveWorkspace}><header><span><Icon name="folder" size={23}/></span><div><h2>创建新工作空间</h2><p>命名后由服务端自动创建 Agent 的工作目录</p></div><button type="button" onClick={() => setWorkspaceCreateOpen(false)}>×</button></header><label className="workspace-create-label">工作空间名称</label><input className="workspace-name-input" autoFocus value={workspaceName} maxLength={80} onChange={(event) => setWorkspaceName(event.target.value)} placeholder="例如：产品研发"/><div className="workspace-server-directory"><Icon name="folder" size={27}/><span><b>服务端托管工作目录</b><small>{workspaceName.trim() ? `将根据“${workspaceName.trim()}”自动生成安全目录` : "填写名称后自动生成，无需输入客户端路径"}</small></span></div><footer><button type="button" onClick={() => setWorkspaceCreateOpen(false)}>取消</button><button type="submit" className="primary" disabled={!workspaceName.trim() || savingWorkspace}><Icon name="plus" size={15}/>{savingWorkspace ? "创建中…" : "创建工作空间"}</button></footer></form></div>}
+    {workspaceManagerOpen && <div className="backdrop workspace-manager-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !savingWorkspace && setWorkspaceManagerOpen(false)}><section className="workspace-manager" role="dialog" aria-modal="true" aria-labelledby="workspace-manager-title"><header><div><h2 id="workspace-manager-title">空间管理</h2><p>创建、查看、修改或删除工作空间。删除空间会同时删除其中的全部任务。</p></div><button type="button" onClick={() => setWorkspaceManagerOpen(false)}>×</button></header><div className="workspace-manager-body"><div className="workspace-manager-list"><div className="workspace-manager-list-title"><b>工作空间</b><button type="button" onClick={beginCreateWorkspace}>＋ 新建</button></div>{workspaces.map((workspace) => <article className={workspaceEditor?.id === workspace.id ? "active" : ""} key={workspace.id}><Icon name="folder" size={17}/><button type="button" className="workspace-manager-select" onClick={() => editWorkspace(workspace)}><b>{workspace.name}</b><small>{workspace.cwd || "未设置工作目录"} · {channels.filter((channel) => channel.workspaceId === workspace.id).length} 个任务</small></button><button type="button" onClick={() => editWorkspace(workspace)}>编辑</button>{workspace.id !== "workspace-default" && <button type="button" className="danger" disabled={deletingWorkspaceId === workspace.id} onClick={() => setDeleteWorkspaceTarget(workspace)}>{deletingWorkspaceId === workspace.id ? "删除中" : "删除"}</button>}</article>)}</div><form className="workspace-editor" onSubmit={saveWorkspace}><h3>{workspaceEditor ? "编辑工作空间" : "空间详情"}</h3>{workspaceEditor === undefined || workspaceEditor === null ? <div className="workspace-editor-empty"><Icon name="folder" size={28}/><p>选择一个工作空间查看和修改，或新建工作空间。</p></div> : <><label>空间名称<input autoFocus value={workspaceName} maxLength={80} onChange={(event) => setWorkspaceName(event.target.value)} placeholder="例如：产品研发"/></label><label>工作目录<input readOnly value={workspaceCwd} title={workspaceCwd}/><small>该目录由服务端托管，不能从浏览器修改。</small></label><footer><button type="button" onClick={() => setWorkspaceEditor(undefined)}>取消</button><button type="submit" className="primary" disabled={!workspaceName.trim() || savingWorkspace}>{savingWorkspace ? "保存中…" : "保存"}</button></footer></>}</form></div></section></div>}
+    {deleteWorkspaceTarget && <div className="backdrop task-delete-backdrop"><div className="task-delete-dialog" role="alertdialog" aria-modal="true"><span>!</span><h3>删除工作空间“{deleteWorkspaceTarget.name}”？</h3><p>该空间及其中 {channels.filter((channel) => channel.workspaceId === deleteWorkspaceTarget.id).length} 个任务、对话和运行信息将一起删除，此操作无法撤销。</p><footer><button type="button" disabled={Boolean(deletingWorkspaceId)} onClick={() => setDeleteWorkspaceTarget(null)}>取消</button><button type="button" className="danger" disabled={Boolean(deletingWorkspaceId)} onClick={() => void deleteWorkspace(deleteWorkspaceTarget)}>{deletingWorkspaceId ? "删除中…" : "确认删除"}</button></footer></div></div>}
+    {deleteTaskTargets.length > 0 && <div className="backdrop task-delete-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !deletingTask && setDeleteTaskTargets([])}><div className="task-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="task-delete-title"><span>!</span><h3 id="task-delete-title">{deleteTaskTargets.length === 1 ? `删除任务“${deleteTaskTargets[0].title}”？` : `删除选中的 ${deleteTaskTargets.length} 个任务？`}</h3><p>{deleteTaskTargets.length === 1 ? "任务中的对话、消息和运行信息会一起删除，此操作无法撤销。" : "选中任务的对话、消息和运行信息将一并删除，此操作无法撤销。"}</p><footer><button type="button" disabled={deletingTask} onClick={() => setDeleteTaskTargets([])}>取消</button><button type="button" className="danger" disabled={deletingTask} onClick={() => void deleteTask()}>{deletingTask ? "删除中…" : "确认删除"}</button></footer></div></div>}
+    {createOpen && <div className="backdrop" onMouseDown={(event) => event.target === event.currentTarget && setCreateOpen(false)}><form className="dialog" onSubmit={createTask}><header><span><Icon name="plus"/></span><div><h2>新建任务</h2><p>选择工作空间和数字员工，开始一项可持续推进的工作。</p></div><button type="button" onClick={() => setCreateOpen(false)}>×</button></header><label>任务名称</label><input autoFocus value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} placeholder="例如:梳理产品方案并输出执行计划"/><h3>选择数字员工 <small>{createAgents.length} 个已选择</small></h3><div className="agent-picker">{agents.map((agent) => <button type="button" disabled={!agent.online} className={createAgents.includes(agent.id) ? "picked" : ""} key={agent.id} onClick={() => setCreateAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.description || `${agent.provider} · ${agent.runtime}`}</small></span><i>{createAgents.includes(agent.id) ? "✓" : ""}</i></button>)}</div><label>工作空间</label><select className="workspace-choice-select" value={createWorkspaceId} onChange={(event) => setCreateWorkspaceId(event.target.value)}>{workspaces.map((workspace) => <option value={workspace.id} key={workspace.id}>{workspace.name}{workspace.cwd ? ` · ${workspace.cwd}` : ""}</option>)}</select><footer><button type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="submit" disabled={!createTitle.trim() || !createAgents.length}><Icon name="plus" size={15}/>创建任务</button></footer></form></div>}
   </div>;
 }
 
@@ -423,9 +522,10 @@ function ChatAgentSettings({ agent, agents, binding, conversationId, hasActiveRu
   return <div className="backdrop chat-settings-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !saving && onClose()}><form className="chat-agent-settings" onSubmit={submit}><header><span className="run-avatar">◉</span><div><h2>选择当前对话的数字员工</h2><p>保存后替换当前任务会话，后续消息使用新配置。</p></div><button type="button" onClick={onClose}>×</button></header><label><span>数字员工</span><select value={agent.id} onChange={(event) => onSelectAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.online ? "" : "（离线）"}</option>)}</select></label>{binding && <div className="chat-effective-model"><span>当前会话</span><b>{[binding.effectiveProvider, binding.effectiveModel].filter(Boolean).join("/") || "Runtime 默认模型"}</b><small>Session #{binding.generation} · {binding.effectiveThinkingLevel || "默认思考强度"}</small></div>}<div className="chat-model-fields"><label><span>Provider</span><input value={provider} onChange={(event) => setProvider(event.target.value)} placeholder={agent.provider}/></label><label><span>模型</span><input list="known-agent-models" value={model} onChange={(event) => setModel(event.target.value)} placeholder="例如 anthropic/claude-sonnet-4-5"/><datalist id="known-agent-models">{knownModels.map((value) => <option value={value} key={value}/>)}</datalist></label></div><label><span>思考强度</span><select value={thinking} onChange={(event) => setThinking(event.target.value)}>{["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>{hasActiveRun && <div className="chat-settings-notice">Agent 正在运行。停止或等待本次运行结束后再切换模型。</div>}{error && <div className="chat-settings-error">{error}</div>}<footer><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={saving || hasActiveRun || !model.trim()}>{saving ? "切换中…" : "保存并应用到当前任务"}</button></footer></form></div>;
 }
 
-function DraftTaskHome({ agents, selectedAgentId, onSelectAgent, draft, onDraft, onSend, sending }: { agents: AgentSummary[]; selectedAgentId: string; onSelectAgent: (id: string) => void; draft: string; onDraft: (value: string) => void; onSend: (event: FormEvent) => void; sending: boolean }) {
+function DraftTaskHome({ agents, selectedAgentId, onSelectAgent, draft, onDraft, onSend, sending, onChooseModel }: { agents: AgentSummary[]; selectedAgentId: string; onSelectAgent: (id: string) => void; draft: string; onDraft: (value: string) => void; onSend: (event: FormEvent) => void; sending: boolean; onChooseModel: (agentId: string) => void }) {
   const selected = agents.find((agent) => agent.id === selectedAgentId) ?? agents.find((agent) => agent.online) ?? agents[0];
   const displayName = selected?.name || "小糖糖";
+  const modelLabel = selected?.desiredModel || selected?.provider || "默认模型";
   return <section className="draft-task-home">
     <header><b>新任务</b><span>草稿</span></header>
     <div className="draft-stage">
@@ -438,7 +538,7 @@ function DraftTaskHome({ agents, selectedAgentId, onSelectAgent, draft, onDraft,
           <button type="button" className="mode-pill">问答⌄</button><button type="button" className="permission-pill">按需确认⌄</button><button type="button" className="add-pill">＋</button>
           <button className="draft-send" disabled={!draft.trim() || !selected?.online || sending} title={!selected?.online ? "需要一个在线数字员工" : "发送"}>{sending ? <i className="send-spinner"/> : <Icon name="send" size={15}/>}</button>
         </div>
-        <div className="draft-context"><span><Icon name="folder" size={13}/>默认工作空间⌄</span><span>{selected?.desiredModel || selected?.provider || "默认模型"}⌄</span></div>
+        <div className="draft-context"><button type="button" className="draft-context-pill" disabled title="当前仅一个工作空间，多工作空间即将开放"><Icon name="folder" size={13}/>默认工作空间<i>⌄</i></button><button type="button" className="draft-context-pill" disabled={!selected} onClick={() => selected && onChooseModel(selected.id)} title={selected ? "选择或配置模型" : "需要先选择数字员工"}>{modelLabel}<i>⌄</i></button></div>
       </form>
       <div className="draft-shortcuts"><button type="button"><Icon name="file" size={14}/>文档</button><button type="button"><Icon name="database" size={14}/>表格</button><button type="button"><Icon name="globe" size={14}/>浏览器</button></div>
     </div>
