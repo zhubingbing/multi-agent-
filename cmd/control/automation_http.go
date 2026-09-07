@@ -159,16 +159,39 @@ func registerAutomationRoutes(mux *http.ServeMux, store *automation.Store, conve
 	})
 
 	mux.HandleFunc("/api/multi-agent/automation-runs", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			runs, err := store.ListRuns(r.Context(), r.URL.Query().Get("automationId"), 100)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeAutomationJSON(w, http.StatusOK, map[string]any{"runs": runs})
+		case http.MethodDelete:
+			var request struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&request); err != nil {
+				http.Error(w, "invalid JSON", http.StatusBadRequest)
+				return
+			}
+			if len(request.IDs) == 0 {
+				http.Error(w, "ids is required", http.StatusBadRequest)
+				return
+			}
+			deleted, err := store.DeleteRuns(r.Context(), request.IDs)
+			if err != nil {
+				if errors.Is(err, automation.ErrRunActive) {
+					http.Error(w, "部分运行仍在进行中，无法删除", http.StatusConflict)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeAutomationJSON(w, http.StatusOK, map[string]any{"deleted": deleted})
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-		runs, err := store.ListRuns(r.Context(), r.URL.Query().Get("automationId"), 100)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeAutomationJSON(w, http.StatusOK, map[string]any{"runs": runs})
 	})
 }
 

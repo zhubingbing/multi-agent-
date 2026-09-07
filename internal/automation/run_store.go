@@ -173,6 +173,53 @@ func (s *Store) FailRun(ctx context.Context, id, code, reason string) (Run, erro
 	return s.GetRun(ctx, id)
 }
 
+// ErrRunActive is returned when trying to delete an automation run that is still active.
+var ErrRunActive = errors.New("automation run is still active")
+
+// DeleteRuns removes automation run records by ID. Runs that are still active
+// (received/admitted/queued/dispatched/running) are refused with ErrRunActive.
+// Returns the number of rows actually deleted.
+func (s *Store) DeleteRuns(ctx context.Context, ids []string) (int, error) {
+	trimmed := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		trimmed = append(trimmed, id)
+	}
+	if len(trimmed) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.Repeat("?,", len(trimmed))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(trimmed))
+	for _, id := range trimmed {
+		args = append(args, id)
+	}
+	var active int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM automation_runs WHERE id IN (`+placeholders+`) AND status IN ('received','admitted','queued','dispatched','running')`, args...).Scan(&active); err != nil {
+		return 0, err
+	}
+	if active > 0 {
+		return 0, ErrRunActive
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM automation_runs WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
 func (s *Store) ClearConversationReference(ctx context.Context, conversationID string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE automation_runs SET conversation_deleted=1 WHERE conversation_id=?`, strings.TrimSpace(conversationID))
 	return err

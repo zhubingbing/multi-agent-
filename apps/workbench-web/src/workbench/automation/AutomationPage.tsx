@@ -69,6 +69,9 @@ export function AutomationPage({ agents, runtimes, onOpenConversation }: Props) 
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [manage, setManage] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
+  const [selectedRunIds, setSelectedRunIds] = useState<string[]>([]);
+  const [pendingRunDelete, setPendingRunDelete] = useState<AutomationRun[]>([]);
+  const [deletingRuns, setDeletingRuns] = useState(false);
   const [runFilter, setRunFilter] = useState<"all" | "running" | "succeeded" | "failed">("all");
   const [actionMenuId, setActionMenuId] = useState("");
   const [pendingDelete, setPendingDelete] = useState<AutomationRecord[]>([]);
@@ -148,6 +151,26 @@ export function AutomationPage({ agents, runtimes, onOpenConversation }: Props) 
     } finally { setDeleting(false); }
   };
 
+  const confirmRunDelete = async () => {
+    if (!pendingRunDelete.length || deletingRuns) return;
+    setDeletingRuns(true);
+    try {
+      const ids = pendingRunDelete.map((run) => run.id);
+      const response = await fetch("/api/multi-agent/automation-runs", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (!response.ok) throw new Error((await response.text()).trim() || "删除运行记录失败");
+      const removed = new Set(ids);
+      setRuns((current) => current.filter((run) => !removed.has(run.id)));
+      setSelectedRunIds((current) => current.filter((id) => !removed.has(id)));
+      setPendingRunDelete([]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setDeletingRuns(false); }
+  };
+
   const detailItem = items.find((item) => item.id === detailId);
   if (detailItem) {
     const trigger = triggers[detailItem.id];
@@ -157,10 +180,10 @@ export function AutomationPage({ agents, runtimes, onOpenConversation }: Props) 
 
   return <section className="automation-page">
     <header className="automation-toolbar">
-      {manage ? <div className="automation-bulk"><button type="button" onClick={() => setSelected(selected.length === visible.length ? [] : visible.map((item) => item.id))}>全选</button><button type="button" className="danger" disabled={!selected.length} onClick={() => setPendingDelete(items.filter((item) => selected.includes(item.id)))}>删除所选</button><span>已选择 {selected.length} 项</span></div> : <nav><button type="button" className={tab === "schedules" ? "active" : ""} onClick={() => setTab("schedules")}>◷ 定时任务</button><button type="button" className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}>▣ 运行记录</button></nav>}
+      {manage ? tab === "schedules" ? <div className="automation-bulk"><button type="button" onClick={() => setSelected(selected.length === visible.length ? [] : visible.map((item) => item.id))}>全选</button><button type="button" className="danger" disabled={!selected.length} onClick={() => setPendingDelete(items.filter((item) => selected.includes(item.id)))}>删除所选</button><span>已选择 {selected.length} 项</span></div> : <div className="automation-bulk"><button type="button" onClick={() => setSelectedRunIds(selectedRunIds.length === visibleRuns.length ? [] : visibleRuns.map((run) => run.id))}>全选</button><button type="button" onClick={() => { const finished = visibleRuns.filter((run) => ["succeeded","failed","cancelled","expired","skipped"].includes(run.status)); setSelectedRunIds(finished.map((run) => run.id)); }}>选中已完成</button><button type="button" className="danger" disabled={!selectedRunIds.length} onClick={() => setPendingRunDelete(runs.filter((run) => selectedRunIds.includes(run.id)))}>删除所选</button><span>已选择 {selectedRunIds.length} 项</span></div> : <nav><button type="button" className={tab === "schedules" ? "active" : ""} onClick={() => setTab("schedules")}>◷ 定时任务</button><button type="button" className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}>▣ 运行记录</button></nav>}
       <div className="automation-toolbar-actions">
         {!manage && <label><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索自动化/记录"/></label>}
-        <button type="button" onClick={() => { setManage((value) => !value); setSelected([]); }}>{manage ? "退出管理" : "批量管理"}</button>
+        <button type="button" onClick={() => { setManage((value) => !value); setSelected([]); setSelectedRunIds([]); }}>{manage ? "退出管理" : "批量管理"}</button>
         {!manage && <div className="automation-add"><button type="button" className="primary" onClick={() => setCreateOpen(true)}>添加自动化</button><button type="button" className="primary caret" onClick={() => setAddMenuOpen((value) => !value)}>⌄</button>{addMenuOpen && <div><button type="button" onClick={() => { setCreateOpen(true); setAddMenuOpen(false); }}>从空白创建</button><button type="button" disabled>从专家模板创建 · 即将开放</button><button type="button" disabled>从 Skill 创建 · 即将开放</button><button type="button" disabled>从连接器创建 · 即将开放</button></div>}</div>}
       </div>
     </header>
@@ -180,13 +203,14 @@ export function AutomationPage({ agents, runtimes, onOpenConversation }: Props) 
       {!loading && visible.length === 0 && <div className="automation-empty"><span>◷</span><b>还没有自动化</b><p>创建一条数字员工或 Script 自动化，把重复工作交给后台执行。</p><button type="button" onClick={() => setCreateOpen(true)}>添加自动化</button></div>}
     </div> : <div className="automation-run-list">
       <div className="automation-section-label"><span>最近运行</span><nav className="automation-run-filters">{([['all','全部'],['running','进行中'],['succeeded','成功'],['failed','失败']] as const).map(([value, label]) => <button type="button" className={runFilter === value ? "active" : ""} onClick={() => setRunFilter(value)} key={value}>{label}</button>)}</nav></div>
-      {visibleRuns.map((run) => { const automation = items.find((item) => item.id === run.automationId); const taskDeleted = Boolean(run.conversationDeleted || (run.status === "succeeded" && run.actionType === "agent_prompt" && !run.conversationId)); return <article className={`status-${run.status}`} key={run.id}>
-        <span className={`automation-run-status ${run.status}`}/><div className="automation-run-main"><b>{automation?.name || `已删除的自动化 · ${run.automationId.slice(-6)}`}</b><small>{runSourceLabel(run.source)} · {new Date(run.triggeredAt).toLocaleString()}</small></div><span className={`automation-run-badge ${taskDeleted ? "deleted" : run.status}`}>{taskDeleted ? "任务已删除" : runStatusLabel(run.status)}</span><time>{runDuration(run)}</time>{run.failureReason && <p>{runFailureLabel(run.failureReason)}</p>}{taskDeleted ? <span className="automation-run-task-deleted">运行结果：{runStatusLabel(run.status)}</span> : run.conversationId ? <button type="button" onClick={() => onOpenConversation(run.conversationId!, run.agentRunId)}>查看任务</button> : null}
+      {visibleRuns.map((run) => { const automation = items.find((item) => item.id === run.automationId); const taskDeleted = Boolean(run.conversationDeleted || (run.status === "succeeded" && run.actionType === "agent_prompt" && !run.conversationId)); const isActive = ["received","admitted","queued","dispatched","running"].includes(run.status); return <article className={`status-${run.status} ${manage ? "manage" : ""} ${manage && selectedRunIds.includes(run.id) ? "picked" : ""}`} key={run.id}>
+        {manage && <input type="checkbox" className="automation-run-check" disabled={isActive} title={isActive ? "运行中的记录不能删除" : undefined} checked={selectedRunIds.includes(run.id)} onChange={() => setSelectedRunIds((current) => current.includes(run.id) ? current.filter((id) => id !== run.id) : [...current, run.id])}/>}<span className={`automation-run-status ${run.status}`}/><div className="automation-run-main"><b>{automation?.name || `已删除的自动化 · ${run.automationId.slice(-6)}`}</b><small>{runSourceLabel(run.source)} · {new Date(run.triggeredAt).toLocaleString()}</small></div><span className={`automation-run-badge ${taskDeleted ? "deleted" : run.status}`}>{taskDeleted ? "任务已删除" : runStatusLabel(run.status)}</span><time>{runDuration(run)}</time>{run.failureReason && <p>{runFailureLabel(run.failureReason)}</p>}{!manage && (taskDeleted ? <span className="automation-run-task-deleted">运行结果：{runStatusLabel(run.status)}</span> : run.conversationId ? <button type="button" onClick={() => onOpenConversation(run.conversationId!, run.agentRunId)}>查看任务</button> : null)}
       </article>; })}
       {runs.length === 0 && <div className="automation-empty automation-runs-empty"><span>▣</span><b>还没有运行记录</b><p>点击自动化后的“立即运行”，后台会创建任务并派发给数字员工。</p></div>}
       {runs.length > 0 && visibleRuns.length === 0 && <div className="automation-empty automation-runs-empty"><span>⌕</span><b>没有匹配的运行记录</b><p>调整状态筛选或搜索关键词。</p></div>}
     </div>}
 
+    {pendingRunDelete.length > 0 && <div className="backdrop automation-delete-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !deletingRuns && setPendingRunDelete([])}><div className="automation-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="automation-run-delete-title"><span>!</span><h3 id="automation-run-delete-title">删除选中的 {pendingRunDelete.length} 条运行记录？</h3><p>删除后无法恢复。关联任务依然保留，仅清理本地的运行历史。</p><footer><button type="button" disabled={deletingRuns} onClick={() => setPendingRunDelete([])}>取消</button><button type="button" className="danger" disabled={deletingRuns} onClick={() => void confirmRunDelete()}>{deletingRuns ? "删除中…" : "确认删除"}</button></footer></div></div>}
     {pendingDelete.length > 0 && <div className="backdrop automation-delete-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !deleting && setPendingDelete([])}><div className="automation-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="automation-delete-title"><span>!</span><h3 id="automation-delete-title">删除{pendingDelete.length > 1 ? `这 ${pendingDelete.length} 条自动化` : `“${pendingDelete[0].name}”`}？</h3><p>删除后不会继续触发。已有运行记录和关联任务会保留，方便审计和追溯。</p><footer><button type="button" disabled={deleting} onClick={() => setPendingDelete([])}>取消</button><button type="button" className="danger" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? "删除中…" : "确认删除"}</button></footer></div></div>}
     {createOpen && <AutomationDialog agents={agents} runtimes={runtimes} onClose={() => setCreateOpen(false)} onSaved={(created, trigger) => { setItems((current) => [created, ...current]); if (trigger) setTriggers((current) => ({ ...current, [created.id]: trigger })); setCreateOpen(false); }}/>} 
     {editing && <AutomationDialog initial={editing} initialTrigger={triggers[editing.id]} agents={agents} runtimes={runtimes} onClose={() => setEditing(null)} onSaved={(updated, trigger) => { setItems((current) => current.map((item) => item.id === updated.id ? updated : item)); setTriggers((current) => trigger ? ({ ...current, [updated.id]: trigger }) : Object.fromEntries(Object.entries(current).filter(([id]) => id !== updated.id))); setEditing(null); }}/>}
