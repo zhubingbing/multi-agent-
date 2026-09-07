@@ -1,0 +1,48 @@
+.workbench-crash {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  padding: 24px;
+  place-items: center;
+  background: #f7f8fa;
+  color: #343a40;
+}
+
+.workbench-crash > div {
+  width: min(520px, 100%);
+  padding: 24px;
+  border: 1px solid #e2e5e8;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 36px #1d263314;
+}
+
+.workbench-crash h1 { margin: 0 0 8px; font-size: 20px; }
+.workbench-crash p { margin: 0 0 16px; color: #747c84; }
+.workbench-crash details { margin-bottom: 16px; color: #7c4a4a; }
+.workbench-crash pre { overflow: auto; white-space: pre-wrap; font-size: 12px; }
+.workbench-crash button,
+.run-render-error button {
+  padding: 6px 10px;
+  border: 1px solid #dce1e5;
+  border-radius: 7px;
+  background: #fff;
+  color: #286db2;
+  cursor: pointer;
+}
+
+.run-render-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 16px 35px;
+  padding: 9px 11px;
+  border: 1px solid #eadede;
+  border-radius: 8px;
+  background: #fffafa;
+  color: #735f5f;
+  font-size: 12px;
+}
+
+.run-render-error span { color: #92989e; }
+.run-render-error button { margin-left: auto; }

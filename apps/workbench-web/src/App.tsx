@@ -3,14 +3,32 @@ import { INITIAL_STREAMING_STATE, mergeGroupConversationTurns, type GroupAgentRu
 import { reduceLiveRun, type AgentSessionEvent, type LiveRun } from "./chat-stream";
 import { ConversationTimeline } from "./ConversationTimeline";
 import { ChatComposer } from "./ChatComposer";
+import { AgentCenter } from "./workbench/agents/AgentCenter";
+import { AutomationPage } from "./workbench/automation/AutomationPage";
+import { ModelConfigPanel } from "./workbench/models/ModelConfigPanel";
+import { RuntimeCenter } from "./workbench/runtime/RuntimeCenter";
+import type {
+  AgentListResponse,
+  AgentResponse,
+  AgentSummary,
+  BindingListResponse,
+  ChannelListResponse,
+  ChannelSummary,
+  ConversationBinding,
+  ConversationTurnsResponse,
+  CreateChannelResponse,
+  ModelListResponse,
+  ModelSummary,
+  RuntimeListResponse,
+  RuntimeSummary,
+  AgentConfigPatch,
+} from "./contracts/control-api";
 
-type View = "tasks" | "agents" | "apps" | "automation" | "settings";
+type View = "tasks" | "agents" | "settings";
+type WorkbenchOverlay = "apps" | "automation";
 type TaskMode = "chat" | "split" | "canvas";
 type CanvasTab = "assets" | "workspace" | "runs";
-type Channel = { id: string; title: string; agentIds: string[]; createdAt: number };
-type Agent = { id: string; name: string; runtime: string; runtimeId?: string; provider: string; cwd: string; online: boolean; description?: string; desiredModel?: string; desiredThinkingLevel?: string; desiredCwd?: string; presence?: string; inboxUnread?: number };
-type Runtime = { id: string; name: string; status: string; nodeVersion?: string; piVersion?: string; os?: string; architecture?: string };
-type Binding = { agentId: string; nativeSessionId: string; generation: number; state: string; effectiveModel?: string; effectiveProvider?: string; effectiveThinkingLevel?: string; effectiveCwd?: string };
+type SettingsSection = "models" | "runtimes";
 
 const iconPaths: Record<string, ReactNode> = {
   tasks: <><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10M9 20v-6h6v6"/></>,
@@ -53,15 +71,19 @@ function socketUrl(conversationId: string) {
 
 export function App() {
   const [view, setView] = useState<View>("tasks");
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [runtimes, setRuntimes] = useState<Runtime[]>([]);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("models");
+  const [overlay, setOverlay] = useState<WorkbenchOverlay | null>(null);
+  const [channels, setChannels] = useState<ChannelSummary[]>([]);
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [runtimes, setRuntimes] = useState<RuntimeSummary[]>([]);
   const [activeId, setActiveId] = useState("");
+  const [activeAgentId, setActiveAgentId] = useState("");
   const [turns, setTurns] = useState<GroupConversationTurn[]>([]);
-  const [bindings, setBindings] = useState<Binding[]>([]);
+  const [bindings, setBindings] = useState<ConversationBinding[]>([]);
   const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
   const [mode, setMode] = useState<TaskMode>(() => (localStorage.getItem("workbench-task-mode-v2") as TaskMode) || "chat");
   const [canvasTab, setCanvasTab] = useState<CanvasTab>("workspace");
+  const [focusedRunId, setFocusedRunId] = useState("");
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
@@ -74,6 +96,12 @@ export function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
   const [createAgents, setCreateAgents] = useState<string[]>([]);
+  const [taskMenuId, setTaskMenuId] = useState("");
+  const [deleteTaskTarget, setDeleteTaskTarget] = useState<ChannelSummary | null>(null);
+  const [deletingTask, setDeletingTask] = useState(false);
+  const [chatConfigAgentId, setChatConfigAgentId] = useState("");
+  const [modelPickerAgentId, setModelPickerAgentId] = useState("");
+  const [modelConfigAgentId, setModelConfigAgentId] = useState("");
   const [error, setError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const pendingPromptRef = useRef<{ conversationId: string; message: string; agentId: string } | null>(null);
@@ -91,12 +119,13 @@ export function App() {
         fetch("/api/multi-agent/runtimes", { cache: "no-store" }),
       ]);
       if (!channelResponse.ok) throw new Error("Control Server 尚未启动");
-      const channelData = await channelResponse.json() as { channels?: Channel[] };
-      const agentData = await agentResponse.json() as { agents?: Agent[] };
-      const runtimeData = await runtimeResponse.json() as { runtimes?: Runtime[] };
+      const channelData = await channelResponse.json() as ChannelListResponse;
+      const agentData = await agentResponse.json() as AgentListResponse;
+      const runtimeData = await runtimeResponse.json() as RuntimeListResponse;
       const nextChannels = channelData.channels ?? [];
       setChannels(nextChannels);
       setAgents(agentData.agents ?? []);
+      setActiveAgentId((current) => current || (agentData.agents ?? [])[0]?.id || "");
       setDraftAgentId((current) => current || (agentData.agents ?? []).find((agent) => agent.online)?.id || (agentData.agents ?? [])[0]?.id || "");
       setRuntimes(runtimeData.runtimes ?? []);
       setActiveId((current) => current || new URLSearchParams(location.search).get("conversation") || nextChannels[0]?.id || "");
@@ -126,9 +155,9 @@ export function App() {
       fetch(`/api/multi-agent/bindings?conversationId=${encodeURIComponent(conversationId)}`, { cache: "no-store" }),
       fetch(`/api/multi-agent/conversations/${encodeURIComponent(conversationId)}/turns`, { cache: "no-store" }),
     ]);
-    if (bindingResponse.ok) setBindings(((await bindingResponse.json()) as { bindings?: Binding[] }).bindings ?? []);
+    if (bindingResponse.ok) setBindings(((await bindingResponse.json()) as BindingListResponse).bindings ?? []);
     if (turnResponse.ok) {
-      const data = await turnResponse.json() as { turns?: GroupConversationTurn[]; cursors?: Array<{ runtimeId: string; instanceId: string; sequence: number }> };
+      const data = await turnResponse.json() as ConversationTurnsResponse;
       setTurns((current) => mergeGroupConversationTurns(current, data.turns ?? []));
       for (const cursor of data.cursors ?? []) {
         const key = `${cursor.runtimeId}\u0000${cursor.instanceId}`;
@@ -138,6 +167,12 @@ export function App() {
   }, []);
 
   useEffect(() => { void loadShell(); }, [loadShell]);
+  useEffect(() => {
+    if (!taskMenuId) return;
+    const close = (event: MouseEvent) => { if (!(event.target instanceof Element) || !event.target.closest(".task-list-item")) setTaskMenuId(""); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [taskMenuId]);
   useEffect(() => {
     if (!activeId) return;
     history.replaceState(null, "", `/conversations?conversation=${encodeURIComponent(activeId)}`);
@@ -170,9 +205,9 @@ export function App() {
           setRunning((current) => current.includes(event.agentId!) ? current : [...current, event.agentId!]);
           updateRun(event.agentId, (run) => reduceLiveRun(run as LiveRun, event.event!) as GroupAgentRun, event.runId);
         }
-        if (event.type === "conversation_committed") {
+        if (event.type === "conversation_committed" || event.type === "binding_updated") {
           void loadConversation(activeId).finally(() => {
-            if (event.agentId) setRunning((current) => current.filter((id) => id !== event.agentId));
+            if (event.type === "conversation_committed" && event.agentId) setRunning((current) => current.filter((id) => id !== event.agentId));
           });
         }
         if (event.type === "agent_error" && event.agentId) {
@@ -188,7 +223,9 @@ export function App() {
   }, [activeId, active?.agentIds, agents, loadConversation, updateRun]);
 
   const chooseMode = (next: TaskMode) => { setMode(next); localStorage.setItem("workbench-task-mode-v2", next); };
-  const selectTask = (id: string) => { setTurns([]); setRunning([]); setActiveId(id); setView("tasks"); };
+  const selectTask = (id: string) => { setTurns([]); setRunning([]); setFocusedRunId(""); setActiveId(id); setView("tasks"); setOverlay(null); };
+  const openAutomationTask = (id: string, runId?: string) => { selectTask(id); setFocusedRunId(runId ?? ""); setCanvasTab("runs"); chooseMode("split"); };
+  const openOverlay = (next: WorkbenchOverlay) => { setView("tasks"); setOverlay(next); };
   const beginDraftTask = () => {
     setActiveId("");
     setTurns([]);
@@ -197,6 +234,7 @@ export function App() {
     setDraft("");
     setDraftAgentId((current) => current || agents.find((agent) => agent.online)?.id || agents[0]?.id || "");
     setView("tasks");
+    setOverlay(null);
     history.replaceState(null, "", "/conversations");
   };
   const openCreate = () => { setCreateTitle(""); setCreateAgents(agents.find((agent) => agent.online)?.id ? [agents.find((agent) => agent.online)!.id] : []); setCreateOpen(true); };
@@ -205,8 +243,25 @@ export function App() {
     event.preventDefault();
     const response = await fetch("/api/multi-agent/channels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: createTitle.trim(), agentIds: createAgents }) });
     if (!response.ok) { setError(await response.text()); return; }
-    const { channel } = await response.json() as { channel: Channel };
+    const { channel } = await response.json() as CreateChannelResponse;
     setChannels((current) => [channel, ...current]); setActiveId(channel.id); setCreateOpen(false);
+  };
+
+  const deleteTask = async () => {
+    if (!deleteTaskTarget || deletingTask) return;
+    setDeletingTask(true);
+    try {
+      const response = await fetch(`/api/multi-agent/channels/${encodeURIComponent(deleteTaskTarget.id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error((await response.text()).trim() || "删除任务失败");
+      const remaining = channels.filter((channel) => channel.id !== deleteTaskTarget.id);
+      setChannels(remaining);
+      if (activeId === deleteTaskTarget.id) {
+        setTurns([]); setBindings([]); setRunning([]); setActiveId(remaining[0]?.id ?? "");
+        history.replaceState(null, "", remaining[0] ? `/conversations?conversation=${encodeURIComponent(remaining[0].id)}` : "/conversations");
+      }
+      setDeleteTaskTarget(null);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setDeletingTask(false); }
   };
 
   const dispatchPrompt = (socket: WebSocket, message: string, targets: string[], requestedMode: "sequential" | "parallel") => {
@@ -260,7 +315,7 @@ export function App() {
         body: JSON.stringify({ title: taskTitleFromPrompt(message), agentIds: [target.id] }),
       });
       if (!response.ok) throw new Error(await response.text());
-      const { channel } = await response.json() as { channel: Channel };
+      const { channel } = await response.json() as CreateChannelResponse;
       setChannels((current) => [channel, ...current]);
       setSelectedAgents([target.id]);
       pendingPromptRef.current = { conversationId: channel.id, message, agentId: target.id };
@@ -275,24 +330,100 @@ export function App() {
 
   return <div className="window">
     <header className="topbar"><div className="traffic"><i/><i/><i/></div><button className="account">个人账号⌄</button><div className="drag"/><span className="connection"><i className={connected ? "on" : ""}/>{connected ? "服务已连接" : "正在连接"}</span></header>
-    <div className="shell">
-      <nav className="rail"><Rail icon="tasks" label="任务" active={view === "tasks"} onClick={() => setView("tasks")}/><Rail icon="agents" label="AI 分身" active={view === "agents"} onClick={() => setView("agents")}/><Rail icon="message" label="消息"/><Rail icon="apps" label="应用" active={view === "apps"} onClick={() => setView("apps")}/><Rail icon="automation" label="自动化" active={view === "automation"} onClick={() => setView("automation")}/><span/><Rail icon="settings" label="设置" active={view === "settings"} onClick={() => setView("settings")}/><button className="profile">U</button></nav>
+    <div className={`shell ${view === "settings" && settingsSection === "runtimes" ? "module-fullscreen" : ""}`}>
+      <nav className="rail"><Rail icon="tasks" label="任务" active={view === "tasks"} onClick={() => { setView("tasks"); setOverlay(null); }}/><Rail icon="agents" label="数字员工" active={!overlay && view === "agents"} onClick={() => { setView("agents"); setOverlay(null); }}/><Rail icon="message" label="消息"/><span/><Rail icon="settings" label="设置" active={!overlay && view === "settings"} onClick={() => { setView("settings"); setOverlay(null); }}/><button className="profile">U</button></nav>
       <aside className="sidebar">
-        {view === "tasks" ? <><div className="primary-nav"><button className="new" onClick={beginDraftTask}><Icon name="plus" size={16}/>新任务</button><button onClick={() => setView("apps")}><Icon name="apps" size={16}/>应用中心</button><button onClick={() => setView("automation")}><Icon name="automation" size={16}/>自动化</button><button><Icon name="import" size={16}/>导入数据</button></div><div className="side-heading">工作空间 <small>({channels.length ? 1 : 0})</small><button onClick={openCreate}>＋</button></div><div className="search"><Icon name="search" size={14}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务"/></div><div className="tasks"><div className="workspace"><Icon name="folder" size={16}/>默认工作空间 <small>{channels.length}</small></div>{filteredChannels.map((channel) => <button className={channel.id === activeId ? "active" : ""} key={channel.id} onClick={() => selectTask(channel.id)}>{channel.title}</button>)}</div></> : <ModuleSidebar view={view}/>} 
+        {view === "tasks" ? <><div className="primary-nav"><button className={`new ${!overlay ? "active" : ""}`} onClick={beginDraftTask}><Icon name="plus" size={16}/>新任务</button><button className={overlay === "apps" ? "active" : ""} onClick={() => openOverlay("apps")}><Icon name="apps" size={16}/>应用中心</button><button className={overlay === "automation" ? "active" : ""} onClick={() => openOverlay("automation")}><Icon name="automation" size={16}/>自动化</button><button><Icon name="import" size={16}/>导入数据</button></div><div className="side-heading">工作空间 <small>({channels.length ? 1 : 0})</small><button onClick={openCreate}>+</button></div><div className="search"><Icon name="search" size={14}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务"/></div><div className="tasks"><div className="workspace"><Icon name="folder" size={16}/>默认工作空间 <small>{channels.length}</small></div>{filteredChannels.map((channel) => <div className={`task-list-item ${channel.id === activeId && !overlay ? "active" : ""}`} key={channel.id}><button className="task-list-select" onClick={() => selectTask(channel.id)}>{channel.title}</button><button className="task-list-more" aria-label={`${channel.title}的更多操作`} aria-expanded={taskMenuId === channel.id} onClick={() => setTaskMenuId((current) => current === channel.id ? "" : channel.id)}>•••</button>{taskMenuId === channel.id && <div className="task-list-menu"><button type="button" onClick={() => { selectTask(channel.id); setTaskMenuId(""); }}>打开</button><i/><button type="button" className="danger" onClick={() => { setDeleteTaskTarget(channel); setTaskMenuId(""); }}>删除任务</button></div>}</div>)}</div></> : view === "agents" ? <AgentSidebar agents={agents} activeAgentId={activeAgentId} onSelect={setActiveAgentId}/> : <ModuleSidebar view={view} settingsSection={settingsSection} onSettingsSection={setSettingsSection}/>}
       </aside>
       <main className="main">
-        {error && <div className="error">{error}<button onClick={() => setError("")}>×</button></div>}
+        {error && <div className="app-error">{error}<button onClick={() => setError("")}>×</button></div>}
         {view === "tasks" ? active ? <div className={`task-layout mode-${mode}`}>
-          <section className="conversation"><TaskHeader title={active.title}/><div className="agent-strip">{participants.map((agent) => <button key={agent.id} disabled={!agent.online} className={selectedAgents.includes(agent.id) ? "selected" : ""} onClick={() => setSelectedAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span>{agent.name}</span><i>{running.includes(agent.id) ? "运行中" : agent.online ? "可用" : "离线"}</i></button>)}{selectedAgents.length > 1 && <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "sequential" | "parallel")}><option value="sequential">顺序协作</option><option value="parallel">并行协作</option></select>}</div><ConversationTimeline conversationId={activeId} turns={turns} agents={agents} onEdit={(text) => setComposerPrefill(text)} onReply={(turnId, messageId, text) => setReplyTarget({ turnId, messageId, text })} onControl={(agentId, type, message) => sendControl(agentId, type, message)}/><ChatComposer draftKey={activeId} mentions={participants.map((agent) => ({ id: agent.id, label: agent.name, description: `${agent.provider} · ${agent.runtime}`, online: agent.online }))} selectedLabel={participants.find((agent) => selectedAgents.includes(agent.id))?.name || "选择 AI 分身"} modelLabel={participants.find((agent) => selectedAgents.includes(agent.id))?.desiredModel || "默认模型"} streaming={running.length > 0} connected={connected} initialValue={composerPrefill} reply={replyTarget?.text} onCancelReply={() => setReplyTarget(null)} onSend={sendMessage} onAbort={() => sendControl(null, "abort")} onControl={(type, message) => sendControl(null, type, message)}/></section>
-          <TaskCanvas tab={canvasTab} onTab={setCanvasTab} active={active} agents={participants} runtimes={runtimes} bindings={bindings} mode={mode} onMode={chooseMode}/>
-        </div> : <DraftTaskHome agents={agents} selectedAgentId={draftAgentId} onSelectAgent={setDraftAgentId} draft={draft} onDraft={setDraft} onSend={sendDraftTask} sending={creatingFromDraft}/> : <ModulePage view={view} agents={agents} runtimes={runtimes}/>} 
+          <section className="conversation"><TaskHeader title={active.title}/><div className="agent-strip">{participants.map((agent) => <button key={agent.id} disabled={!agent.online} className={selectedAgents.includes(agent.id) ? "selected" : ""} onClick={() => setSelectedAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span>{agent.name}</span><i>{running.includes(agent.id) ? "运行中" : agent.online ? "可用" : "离线"}</i></button>)}{selectedAgents.length > 1 && <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "sequential" | "parallel")}><option value="sequential">顺序协作</option><option value="parallel">并行协作</option></select>}</div><ConversationTimeline conversationId={activeId} turns={turns} agents={agents} onEdit={(text) => setComposerPrefill(text)} onReply={(turnId, messageId, text) => setReplyTarget({ turnId, messageId, text })} onControl={(agentId, type, message) => sendControl(agentId, type, message)}/><ChatComposer draftKey={activeId} mentions={participants.map((agent) => ({ id: agent.id, label: agent.name, description: `${agent.provider} · ${agent.runtime}`, online: agent.online }))} selectedLabel={participants.find((agent) => selectedAgents.includes(agent.id))?.name || "选择数字员工"} modelLabel={bindings.find((binding) => selectedAgents.includes(binding.agentId))?.effectiveModel || participants.find((agent) => selectedAgents.includes(agent.id))?.desiredModel || "默认模型"} streaming={running.length > 0} connected={connected} initialValue={composerPrefill} reply={replyTarget?.text} onCancelReply={() => setReplyTarget(null)} onSend={sendMessage} onAbort={() => sendControl(null, "abort")} onControl={(type, message) => sendControl(null, type, message)} onAgentSettings={() => setChatConfigAgentId(selectedAgents[0] || participants[0]?.id || "")} onModelSettings={() => setModelPickerAgentId(selectedAgents[0] || participants[0]?.id || "")}/></section>
+          <TaskCanvas tab={canvasTab} onTab={setCanvasTab} active={active} agents={participants} runtimes={runtimes} bindings={bindings} turns={turns} focusedRunId={focusedRunId} mode={mode} onMode={chooseMode}/>
+        </div> : <DraftTaskHome agents={agents} selectedAgentId={draftAgentId} onSelectAgent={setDraftAgentId} draft={draft} onDraft={setDraft} onSend={sendDraftTask} sending={creatingFromDraft}/> : <ModulePage view={view} settingsSection={settingsSection} onSettingsSection={setSettingsSection} agents={agents} runtimes={runtimes} channels={channels} activeAgentId={activeAgentId} onChooseModel={setModelPickerAgentId} onRuntimeUpdated={(updated) => setRuntimes((current) => current.map((runtime) => runtime.id === updated.id ? updated : runtime))} onAgentUpdated={(updated) => setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent))}/>}
+        {overlay && <section className="workspace-overlay" aria-label={overlay === "automation" ? "自动化" : "应用中心"}>
+          <header className="workspace-overlay-header"><span><Icon name={overlay}/><b>{overlay === "automation" ? "自动化" : "应用中心"}</b><small>保留当前工作，不离开此页面</small></span><button type="button" onClick={() => setOverlay(null)} aria-label="关闭">×</button></header>
+          <div className="workspace-overlay-body">{overlay === "automation" ? <AutomationPage agents={agents} runtimes={runtimes} onOpenConversation={openAutomationTask}/> : <Catalog/>}</div>
+        </section>}
       </main>
     </div>
-    {createOpen && <div className="backdrop" onMouseDown={(event) => event.target === event.currentTarget && setCreateOpen(false)}><form className="dialog" onSubmit={createTask}><header><span><Icon name="plus"/></span><div><h2>新建任务</h2><p>选择工作空间和 AI 分身，开始一项可持续推进的工作。</p></div><button type="button" onClick={() => setCreateOpen(false)}>×</button></header><label>任务名称</label><input autoFocus value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} placeholder="例如：梳理产品方案并输出执行计划"/><h3>选择 AI 分身 <small>{createAgents.length} 个已选择</small></h3><div className="agent-picker">{agents.map((agent) => <button type="button" disabled={!agent.online} className={createAgents.includes(agent.id) ? "picked" : ""} key={agent.id} onClick={() => setCreateAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.description || `${agent.provider} · ${agent.runtime}`}</small></span><i>{createAgents.includes(agent.id) ? "✓" : ""}</i></button>)}</div><div className="workspace-choice"><Icon name="folder"/><span><b>默认工作空间</b><small>使用 AI 分身配置的工作目录</small></span></div><footer><button type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="submit" disabled={!createTitle.trim() || !createAgents.length}><Icon name="plus" size={15}/>创建任务</button></footer></form></div>}
+    {modelConfigAgentId && agents.find((agent) => agent.id === modelConfigAgentId) && <ModelConfigPanel agent={agents.find((agent) => agent.id === modelConfigAgentId)!} onClose={() => setModelConfigAgentId("")} onSaved={() => setModelPickerAgentId(modelConfigAgentId)}/>}
+    {modelPickerAgentId && <ChatModelPicker agent={agents.find((agent) => agent.id === modelPickerAgentId)} binding={view === "tasks" ? bindings.find((binding) => binding.agentId === modelPickerAgentId) : undefined} conversationIds={view === "tasks" ? [activeId].filter(Boolean) : []} hasActiveRun={running.includes(modelPickerAgentId) || agents.find((agent) => agent.id === modelPickerAgentId)?.presence === "working"} onConfigure={() => { setModelConfigAgentId(modelPickerAgentId); setModelPickerAgentId(""); }} onClose={() => setModelPickerAgentId("")}/>}
+    {chatConfigAgentId && <ChatAgentSettings agent={agents.find((agent) => agent.id === chatConfigAgentId)} agents={participants} binding={bindings.find((binding) => binding.agentId === chatConfigAgentId)} conversationId={activeId} hasActiveRun={running.includes(chatConfigAgentId)} onSelectAgent={(id) => { setChatConfigAgentId(id); setSelectedAgents([id]); }} onClose={() => setChatConfigAgentId("")} onSaved={(updated) => setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent))}/>}
+    {deleteTaskTarget && <div className="backdrop task-delete-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !deletingTask && setDeleteTaskTarget(null)}><div className="task-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="task-delete-title"><span>!</span><h3 id="task-delete-title">删除任务“{deleteTaskTarget.title}”？</h3><p>任务中的对话、消息和运行信息会一起删除，此操作无法撤销。</p><footer><button type="button" disabled={deletingTask} onClick={() => setDeleteTaskTarget(null)}>取消</button><button type="button" className="danger" disabled={deletingTask} onClick={() => void deleteTask()}>{deletingTask ? "删除中…" : "确认删除"}</button></footer></div></div>}
+    {createOpen && <div className="backdrop" onMouseDown={(event) => event.target === event.currentTarget && setCreateOpen(false)}><form className="dialog" onSubmit={createTask}><header><span><Icon name="plus"/></span><div><h2>新建任务</h2><p>选择工作空间和数字员工，开始一项可持续推进的工作。</p></div><button type="button" onClick={() => setCreateOpen(false)}>×</button></header><label>任务名称</label><input autoFocus value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} placeholder="例如:梳理产品方案并输出执行计划"/><h3>选择数字员工 <small>{createAgents.length} 个已选择</small></h3><div className="agent-picker">{agents.map((agent) => <button type="button" disabled={!agent.online} className={createAgents.includes(agent.id) ? "picked" : ""} key={agent.id} onClick={() => setCreateAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}><Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.description || `${agent.provider} · ${agent.runtime}`}</small></span><i>{createAgents.includes(agent.id) ? "✓" : ""}</i></button>)}</div><div className="workspace-choice"><Icon name="folder"/><span><b>默认工作空间</b><small>使用数字员工配置的工作目录</small></span></div><footer><button type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="submit" disabled={!createTitle.trim() || !createAgents.length}><Icon name="plus" size={15}/>创建任务</button></footer></form></div>}
   </div>;
 }
 
-function DraftTaskHome({ agents, selectedAgentId, onSelectAgent, draft, onDraft, onSend, sending }: { agents: Agent[]; selectedAgentId: string; onSelectAgent: (id: string) => void; draft: string; onDraft: (value: string) => void; onSend: (event: FormEvent) => void; sending: boolean }) {
+function ChatModelPicker({ agent, binding, conversationIds, hasActiveRun, onConfigure, onClose }: { agent?: AgentSummary; binding?: ConversationBinding; conversationIds: string[]; hasActiveRun: boolean; onConfigure: () => void; onClose: () => void }) {
+  const [models, setModels] = useState<ModelSummary[]>([]);
+  const [query, setQuery] = useState("");
+  const [provider, setProvider] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!agent) return;
+    const controller = new AbortController();
+    setLoading(true); setError("");
+    void fetch(`/api/multi-agent/models?agentId=${encodeURIComponent(agent.id)}`, { cache: "no-store", signal: controller.signal }).then(async (response) => {
+      if (!response.ok) throw new Error((await response.text()).trim() || "模型目录加载失败");
+      const data = await response.json() as ModelListResponse;
+      setModels(data.models ?? []);
+      if (data.error && !(data.models ?? []).length) setError(data.error);
+    }).catch((reason) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [agent?.id]);
+  if (!agent) return null;
+  const providers = [...new Set(models.map((model) => model.provider))].sort();
+  const normalized = query.trim().toLocaleLowerCase();
+  const visible = models.filter((model) => (provider === "all" || model.provider === provider) && (!normalized || `${model.name} ${model.id} ${model.provider}`.toLocaleLowerCase().includes(normalized))).sort((left, right) => (left.name || left.id).localeCompare(right.name || right.id, undefined, { numeric: true }));
+  const currentProvider = binding?.effectiveProvider || agent.desiredProvider || agent.provider;
+  const currentModel = binding?.effectiveModel || agent.desiredModel || "";
+  const conversationOnly = conversationIds.length > 0;
+  const choose = async (choice: ModelSummary) => {
+    if (!conversationOnly || hasActiveRun || applying) return;
+    const key = `${choice.provider}/${choice.id}`;
+    setApplying(key); setError("");
+    try {
+      const replacement = await fetch(`/api/multi-agent/bindings/${encodeURIComponent(conversationIds[0])}/${encodeURIComponent(agent.id)}/replace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: choice.provider, model: choice.id, thinkingLevel: binding?.effectiveThinkingLevel || agent.desiredThinkingLevel || "medium" }) });
+      if (!replacement.ok) throw new Error((await replacement.text()).trim() || "当前对话模型切换失败");
+      onClose();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setApplying(""); }
+  };
+  return <div className="backdrop model-picker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !applying && onClose()}><section className="chat-model-picker" role="dialog" aria-modal="true" aria-label="添加或切换模型"><header><div><h2>{conversationOnly ? "切换当前对话模型" : `${agent.name} 的可用模型`}</h2><p>{conversationOnly ? `只影响当前任务 · ${agent.runtime}` : `由 ${agent.runtime} 提供；不同对话可以选择不同模型`}</p></div><button type="button" onClick={onClose}>×</button></header><label className="model-search"><Icon name="search" size={15}/><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索模型名称、ID 或 Provider"/></label>{providers.length > 1 && <nav><button type="button" className={provider === "all" ? "active" : ""} onClick={() => setProvider("all")}>全部</button>{providers.map((value) => <button type="button" className={provider === value ? "active" : ""} onClick={() => setProvider(value)} key={value}>{value}</button>)}</nav>}<div className="model-picker-list">{loading && <div className="model-picker-empty">正在从 {agent.runtime} 发现模型…</div>}{!loading && visible.map((model) => { const key = `${model.provider}/${model.id}`; const active = model.provider === currentProvider && model.id === currentModel; return <button type="button" className={active ? "active" : ""} disabled={!conversationOnly || hasActiveRun || Boolean(applying)} onClick={() => void choose(model)} key={key}><span><b>{model.name || model.id}</b><small>{key}</small></span><em>{model.reasoning ? "支持思考" : "标准"}{model.contextWindow ? ` · ${Math.round(model.contextWindow / 1000)}k` : ""}</em><i>{applying === key ? "切换中…" : active ? "当前对话" : conversationOnly ? "切换" : "可用"}</i></button>})}{!loading && visible.length === 0 && <div className="model-picker-empty"><b>{error ? "模型目录不可用" : "没有匹配的模型"}</b><p>{error || "换一个关键词或 Provider 试试。"}</p></div>}</div><button type="button" className="configure-models" onClick={onConfigure}>✎ 配置自定义模型</button>{hasActiveRun && <footer>Agent 正在运行，停止或等待运行完成后再切换模型。</footer>}</section></div>;
+}
+
+function ChatAgentSettings({ agent, agents, binding, conversationId, hasActiveRun, onSelectAgent, onClose, onSaved }: { agent?: AgentSummary; agents: AgentSummary[]; binding?: ConversationBinding; conversationId: string; hasActiveRun: boolean; onSelectAgent: (id: string) => void; onClose: () => void; onSaved: (agent: AgentSummary) => void }) {
+  const [provider, setProvider] = useState(agent?.desiredProvider || agent?.provider || "");
+  const [model, setModel] = useState(agent?.desiredModel || "");
+  const [thinking, setThinking] = useState(agent?.desiredThinkingLevel || "medium");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { setProvider(agent?.desiredProvider || agent?.provider || ""); setModel(agent?.desiredModel || ""); setThinking(agent?.desiredThinkingLevel || "medium"); setError(""); }, [agent?.id]);
+  if (!agent) return null;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!model.trim() || saving || hasActiveRun) return;
+    setSaving(true); setError("");
+    const patch: AgentConfigPatch = { name: agent.name, handle: agent.handle ?? "", description: agent.description ?? "", instructions: agent.instructions ?? "", desiredProvider: provider.trim(), desiredModel: model.trim(), desiredThinkingLevel: thinking, desiredCwd: agent.desiredCwd ?? agent.cwd };
+    try {
+      const response = await fetch(`/api/multi-agent/agents/${encodeURIComponent(agent.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      if (!response.ok) throw new Error((await response.text()).trim() || "模型配置保存失败");
+      const { agent: updated } = await response.json() as AgentResponse;
+      onSaved(updated);
+      const replacement = await fetch(`/api/multi-agent/bindings/${encodeURIComponent(conversationId)}/${encodeURIComponent(agent.id)}/replace`, { method: "POST" });
+      if (!replacement.ok && replacement.status !== 404) throw new Error((await replacement.text()).trim() || "新模型已保存，但当前会话切换失败");
+      onClose();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setSaving(false); }
+  };
+  const knownModels = [...new Set(agents.map((item) => item.desiredModel).filter((value): value is string => Boolean(value)))];
+  return <div className="backdrop chat-settings-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !saving && onClose()}><form className="chat-agent-settings" onSubmit={submit}><header><span className="run-avatar">◉</span><div><h2>选择当前对话的数字员工</h2><p>保存后替换当前任务会话，后续消息使用新配置。</p></div><button type="button" onClick={onClose}>×</button></header><label><span>数字员工</span><select value={agent.id} onChange={(event) => onSelectAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.online ? "" : "（离线）"}</option>)}</select></label>{binding && <div className="chat-effective-model"><span>当前会话</span><b>{[binding.effectiveProvider, binding.effectiveModel].filter(Boolean).join("/") || "Runtime 默认模型"}</b><small>Session #{binding.generation} · {binding.effectiveThinkingLevel || "默认思考强度"}</small></div>}<div className="chat-model-fields"><label><span>Provider</span><input value={provider} onChange={(event) => setProvider(event.target.value)} placeholder={agent.provider}/></label><label><span>模型</span><input list="known-agent-models" value={model} onChange={(event) => setModel(event.target.value)} placeholder="例如 anthropic/claude-sonnet-4-5"/><datalist id="known-agent-models">{knownModels.map((value) => <option value={value} key={value}/>)}</datalist></label></div><label><span>思考强度</span><select value={thinking} onChange={(event) => setThinking(event.target.value)}>{["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>{hasActiveRun && <div className="chat-settings-notice">Agent 正在运行。停止或等待本次运行结束后再切换模型。</div>}{error && <div className="chat-settings-error">{error}</div>}<footer><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={saving || hasActiveRun || !model.trim()}>{saving ? "切换中…" : "保存并应用到当前任务"}</button></footer></form></div>;
+}
+
+function DraftTaskHome({ agents, selectedAgentId, onSelectAgent, draft, onDraft, onSend, sending }: { agents: AgentSummary[]; selectedAgentId: string; onSelectAgent: (id: string) => void; draft: string; onDraft: (value: string) => void; onSend: (event: FormEvent) => void; sending: boolean }) {
   const selected = agents.find((agent) => agent.id === selectedAgentId) ?? agents.find((agent) => agent.online) ?? agents[0];
   const displayName = selected?.name || "小糖糖";
   return <section className="draft-task-home">
@@ -300,11 +431,12 @@ function DraftTaskHome({ agents, selectedAgentId, onSelectAgent, draft, onDraft,
     <div className="draft-stage">
       <div className="draft-greeting"><span className="draft-mascot"><Icon name="agents" size={32}/></span><h1>今天想和 <strong>{displayName}</strong> 一起完成什么？</h1></div>
       <form className="draft-composer" onSubmit={onSend}>
+        <div className="draft-runtime"><Icon name="terminal" size={13}/><span>这个工作空间在 <b>{selected?.runtime || "等待执行设备"}</b> 上运行</span></div>
         <textarea autoFocus value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="提个问题，我来查找和分析…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}/>
         <div className="draft-toolbar">
           <label><Avatar agent={selected}/><select value={selected?.id || ""} onChange={(event) => onSelectAgent(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id} disabled={!agent.online}>{agent.name}{agent.online ? "" : "（离线）"}</option>)}{agents.length === 0 && <option value="">小糖糖</option>}</select></label>
           <button type="button" className="mode-pill">问答⌄</button><button type="button" className="permission-pill">按需确认⌄</button><button type="button" className="add-pill">＋</button>
-          <button className="draft-send" disabled={!draft.trim() || !selected?.online || sending} title={!selected?.online ? "需要一个在线 AI 分身" : "发送"}>{sending ? <i className="send-spinner"/> : <Icon name="send" size={15}/>}</button>
+          <button className="draft-send" disabled={!draft.trim() || !selected?.online || sending} title={!selected?.online ? "需要一个在线数字员工" : "发送"}>{sending ? <i className="send-spinner"/> : <Icon name="send" size={15}/>}</button>
         </div>
         <div className="draft-context"><span><Icon name="folder" size={13}/>默认工作空间⌄</span><span>{selected?.desiredModel || selected?.provider || "默认模型"}⌄</span></div>
       </form>
@@ -315,16 +447,61 @@ function DraftTaskHome({ agents, selectedAgentId, onSelectAgent, draft, onDraft,
 }
 
 function Rail({ icon, label, active, onClick }: { icon: string; label: string; active?: boolean; onClick?: () => void }) { return <button title={label} className={active ? "active" : ""} onClick={onClick}><Icon name={icon}/></button>; }
-function Avatar({ agent }: { agent?: Agent }) { return <span className="avatar"><Icon name="agents" size={17}/><i className={agent?.online ? "online" : ""}/></span>; }
+function Avatar({ agent }: { agent?: AgentSummary }) { return <span className="avatar"><Icon name="agents" size={17}/><i className={agent?.online ? "online" : ""}/></span>; }
 function ModeSwitch({ mode, onMode }: { mode: TaskMode; onMode: (mode: TaskMode) => void }) { return <div className="mode-switch"><button title="对话聚焦" className={mode === "chat" ? "active" : ""} onClick={() => onMode("chat")}><Icon name="chat" size={15}/></button><button title="分屏" className={mode === "split" ? "active" : ""} onClick={() => onMode("split")}><Icon name="columns" size={15}/></button><button title="工作台聚焦" className={mode === "canvas" ? "active" : ""} onClick={() => onMode("canvas")}><Icon name="canvas" size={15}/></button></div>; }
 function TaskHeader({ title }: { title: string }) { return <header className="task-header"><b>{title}</b><div className="task-header-actions"><button title="任务设置">⌂</button><button title="协作者">♧</button></div></header>; }
-function TaskCanvas({ tab, onTab, active, agents, runtimes, bindings, mode, onMode }: { tab: CanvasTab; onTab: (tab: CanvasTab) => void; active: Channel; agents: Agent[]; runtimes: Runtime[]; bindings: Binding[]; mode: TaskMode; onMode: (mode: TaskMode) => void }) {
+function TaskCanvas({ tab, onTab, active, agents, runtimes, bindings, turns, focusedRunId, mode, onMode }: { tab: CanvasTab; onTab: (tab: CanvasTab) => void; active: ChannelSummary; agents: AgentSummary[]; runtimes: RuntimeSummary[]; bindings: ConversationBinding[]; turns: GroupConversationTurn[]; focusedRunId: string; mode: TaskMode; onMode: (mode: TaskMode) => void }) {
+  const focusedRun = focusedRunId ? turns.flatMap((turn) => turn.runs).find((run) => run.id === focusedRunId) : undefined;
   if (mode === "chat") return <aside className="canvas canvas-rail"><nav><b>打开的标签</b><ModeSwitch mode={mode} onMode={onMode}/></nav><div className="canvas-rail-body"><p>打开文档、网页或终端后会显示在这里</p><div className="rail-shortcuts"><h3>快捷入口</h3><button><Icon name="folder" size={16}/>目录</button><button><Icon name="database" size={16}/>云盘</button><button><Icon name="database" size={16}/>多维表</button><button><Icon name="file" size={16}/>文档</button><button className="workbench"><Icon name="apps" size={16}/>工作台</button></div></div></aside>;
-  return <aside className="canvas"><nav><button className={tab === "assets" ? "active" : ""} onClick={() => onTab("assets")}>资产</button><button className={tab === "workspace" ? "active" : ""} onClick={() => onTab("workspace")}>工作空间</button><button className={tab === "runs" ? "active" : ""} onClick={() => onTab("runs")}>运行</button><ModeSwitch mode={mode} onMode={onMode}/></nav><div className="canvas-body">{tab === "workspace" && <><h2>{active.title}</h2><Section title="工作目录"><div className="info-card"><Icon name="folder"/><span><b>{agents[0]?.desiredCwd || agents[0]?.cwd || "尚未设置"}</b><small>本机工作空间</small></span></div></Section><Section title="AI 分身">{agents.map((agent) => <div className="person" key={agent.id}><Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.desiredModel || agent.provider} · {agent.presence || "available"}</small></span></div>)}</Section><Section title="任务设置"><div className="rows"><button>授权策略 <span>按需确认 ›</span></button><button>执行限制 <span>默认 ›</span></button><button>归档任务 <span>›</span></button></div></Section></>}{tab === "assets" && <><h2>任务资产</h2><div className="quick"><Quick icon="folder" label="目录"/><Quick icon="file" label="文档"/><Quick icon="database" label="多维表"/><Quick icon="globe" label="浏览器"/><Quick icon="terminal" label="终端"/></div><Empty title="还没有打开的资产" description="Agent 创建和修改的文件会显示在这里。"/></>}{tab === "runs" && <><h2>执行状态</h2>{runtimes.map((runtime) => <div className="runtime" key={runtime.id}><i className={runtime.status === "online" ? "online" : ""}/><span><b>{runtime.name}</b><small>{runtime.status} · {runtime.os}/{runtime.architecture}</small><small>Node {runtime.nodeVersion || "-"} · Pi {runtime.piVersion || "-"}</small></span></div>)}{bindings.map((binding) => <div className="binding" key={binding.agentId}><b>{agents.find((agent) => agent.id === binding.agentId)?.name || binding.agentId}</b><span>Session #{binding.generation}</span><small>{binding.effectiveProvider}/{binding.effectiveModel} · {binding.state}</small></div>)}</>}</div></aside>;
+  return <aside className="canvas"><nav><button className={tab === "assets" ? "active" : ""} onClick={() => onTab("assets")}>资产</button><button className={tab === "workspace" ? "active" : ""} onClick={() => onTab("workspace")}>工作空间</button><button className={tab === "runs" ? "active" : ""} onClick={() => onTab("runs")}>运行</button><ModeSwitch mode={mode} onMode={onMode}/></nav><div className="canvas-body">{tab === "workspace" && <><h2>{active.title}</h2><Section title="工作目录"><div className="info-card"><Icon name="folder"/><span><b>{agents[0]?.desiredCwd || agents[0]?.cwd || "尚未设置"}</b><small>本机工作空间</small></span></div></Section><Section title="数字员工">{agents.map((agent) => <div className="person" key={agent.id}><Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.desiredModel || agent.provider} · {agent.presence || "available"}</small></span></div>)}</Section><Section title="任务设置"><div className="rows"><button>授权策略 <span>按需确认 ›</span></button><button>执行限制 <span>默认 ›</span></button><button>归档任务 <span>›</span></button></div></Section></>}{tab === "assets" && <><h2>任务资产</h2><div className="quick"><Quick icon="folder" label="目录"/><Quick icon="file" label="文档"/><Quick icon="database" label="多维表"/><Quick icon="globe" label="浏览器"/><Quick icon="terminal" label="终端"/></div><Empty title="还没有打开的资产" description="Agent 创建和修改的文件会显示在这里。"/></>}{tab === "runs" && <><h2>运行详情</h2>{focusedRun && <div className="focused-run-card"><header><span className={`run-dot ${focusedRun.status}`}/><div><b>{agents.find((agent) => agent.id === focusedRun.agentId)?.name || focusedRun.agentId}</b><small>{focusedRun.id}</small></div><em>{focusedRun.error ? "失败" : focusedRun.settled ? "已完成" : focusedRun.status === "queued" ? "等待中" : "运行中"}</em></header>{focusedRun.error && <p>{focusedRun.error}</p>}<dl><div><dt>消息事件</dt><dd>{focusedRun.messages.length}</dd></div><div><dt>Session 状态</dt><dd>{focusedRun.settled ? "已结束" : "活动中"}</dd></div></dl></div>}{!focusedRun && focusedRunId && <div className="runtime">正在加载运行 {focusedRunId}…</div>}{runtimes.map((runtime) => <div className="runtime" key={runtime.id}><i className={runtime.status === "online" ? "online" : ""}/><span><b>{runtime.name}</b><small>{runtime.status} · {runtime.os}/{runtime.architecture}</small><small>Node {runtime.nodeVersion || "-"} · Pi {runtime.piVersion || "-"}</small></span></div>)}{bindings.map((binding) => <div className="binding" key={binding.agentId}><b>{agents.find((agent) => agent.id === binding.agentId)?.name || binding.agentId}</b><span>Session #{binding.generation}</span><small>{binding.effectiveProvider}/{binding.effectiveModel} · {binding.state}</small></div>)}</>}</div></aside>;
 }
 function Section({ title, children }: { title: string; children: ReactNode }) { return <section className="section"><h3>{title}</h3>{children}</section>; }
 function Quick({ icon, label }: { icon: string; label: string }) { return <button><Icon name={icon}/><span>{label}</span></button>; }
 function Empty({ title, description, action }: { title: string; description?: string; action?: ReactNode }) { return <div className="empty"><Icon name="message" size={30}/><b>{title}</b>{description && <p>{description}</p>}{action}</div>; }
-function ModuleSidebar({ view }: { view: View }) { const data: Record<string, string[]> = { agents: ["全部分身", "已停用"], apps: ["应用", "技能", "连接器"], automation: ["全部任务", "运行记录"], settings: ["模型配置", "AI 设置", "执行设备", "系统权限", "外观显示", "版本信息"] }; return <><h2 className="module-title">{{ agents: "AI 分身", apps: "应用中心", automation: "自动化", settings: "设置", tasks: "任务" }[view]}</h2><div className="module-links">{(data[view] || []).map((item, index) => <button className={index === 0 ? "active" : ""} key={item}>{item}</button>)}</div></>; }
-function ModulePage({ view, agents, runtimes }: { view: View; agents: Agent[]; runtimes: Runtime[] }) { const titles = { agents: ["AI 分身", "创建和管理能够持续工作的数字成员"], apps: ["应用中心", "使用应用、技能和连接器扩展 Agent 的能力"], automation: ["自动化", "让 Agent 按计划自动执行任务"], settings: ["执行设备", "查看 Agent Runtime 的连接状态和运行环境"], tasks: ["任务", ""] }[view]; return <div className="page"><header className="page-header"><span><Icon name={view}/></span><div><h1>{titles[0]}</h1><p>{titles[1]}</p></div>{view === "agents" && <button>＋ 新建 AI 分身</button>}</header>{view === "agents" && <div className="agent-grid">{agents.map((agent) => <article key={agent.id}><Avatar agent={agent}/><div><h3>{agent.name}</h3><p>{agent.description || "通用 AI 分身"}</p></div><em className={agent.online ? "good" : ""}>{agent.online ? "可用" : "离线"}</em><dl><div><dt>模型</dt><dd>{agent.desiredModel || agent.provider}</dd></div><div><dt>执行设备</dt><dd>{agent.runtime}</dd></div><div><dt>思考</dt><dd>{agent.desiredThinkingLevel || "默认"}</dd></div></dl><button>查看与配置</button></article>)}</div>}{view === "apps" && <Catalog/>}{view === "automation" && <Empty title="还没有任何自动化任务" description="创建定时任务，让 Agent 按计划自动执行。" action={<button>＋ 新建</button>}/>} {view === "settings" && <div className="runtime-list">{runtimes.map((runtime) => <article key={runtime.id}><span><Icon name="terminal"/></span><div><b>{runtime.name}</b><small>{runtime.os} · {runtime.architecture}</small></div><em className={runtime.status === "online" ? "good" : ""}>{runtime.status}</em><dl><div><dt>Node</dt><dd>{runtime.nodeVersion || "-"}</dd></div><div><dt>Pi</dt><dd>{runtime.piVersion || "-"}</dd></div></dl></article>)}</div>}</div>; }
-function Catalog() { return <>{["内置能力", "工作应用"].map((group, groupIndex) => <section className="catalog" key={group}><h2>{group}</h2><div>{(groupIndex ? [["本地目录", "读取和修改项目文件"], ["终端", "运行命令和开发工具"], ["浏览器", "网页调研与信息采集"]] : [["Skills", "Agent 可调用的专业能力"], ["Plugins", "扩展 Agent 和工作台"], ["Models", "模型与服务提供方"]]).map(([title, description], index) => <article key={title}><span><Icon name={index === 0 ? "apps" : index === 1 ? "automation" : "database"}/></span><div><b>{title}</b><small>{description}</small></div><button>查看</button></article>)}</div></section>)}</>; }
+function AgentSidebar({ agents, activeAgentId, onSelect }: { agents: AgentSummary[]; activeAgentId: string; onSelect: (id: string) => void }) {
+  return <>
+    <div className="agent-sidebar-actions">
+      <button type="button" disabled title="完成 Control → Runtime 动态注册后开放"><Icon name="plus" size={15}/>新建数字员工</button>
+      <button type="button"><span>⊘</span>已停用</button>
+    </div>
+    <div className="agent-sidebar-heading">我的数字员工 <small>{agents.length}</small></div>
+    <div className="agent-sidebar-list">
+      {agents.map((agent) => <button type="button" className={agent.id === activeAgentId ? "active" : ""} key={agent.id} onClick={() => onSelect(agent.id)}>
+        <Avatar agent={agent}/><span><b>{agent.name}</b><small>{agent.description || agent.handle || agent.id}</small></span><time>{agent.presence === "working" ? "工作中" : agent.online ? "在线" : "离线"}</time>
+      </button>)}
+      {agents.length === 0 && <p>等待 Runtime 注册数字员工</p>}
+    </div>
+  </>;
+}
+
+function ModelSettingsPage({ agents, onConfigure }: { agents: AgentSummary[]; onConfigure: (agentId: string) => void }) {
+  const agent = agents.find((item) => item.online) ?? agents[0];
+  const [models, setModels] = useState<ModelSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    if (!agent) { setLoading(false); return; }
+    const controller = new AbortController();
+    void fetch(`/api/multi-agent/models?agentId=${encodeURIComponent(agent.id)}`, { cache: "no-store", signal: controller.signal }).then((response) => response.ok ? response.json() : Promise.reject(new Error("模型目录加载失败"))).then((data: ModelListResponse) => setModels(data.models ?? [])).catch(() => {}).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [agent?.id]);
+  return <div className="page model-settings-page"><header className="page-header"><span><Icon name="automation"/></span><div><h1>模型配置</h1><p>管理 Runtime 模型服务、默认模型和数字员工可用的模型</p></div>{agent && <button type="button" onClick={() => onConfigure(agent.id)}>＋ 添加模型服务</button>}</header><section className="model-settings-section"><h2>当前设备可用模型</h2><p>{agent ? `${agent.runtime} · 选择模型时只展示该设备真实可用的目录` : "等待 Runtime 注册"}</p><div>{loading ? <small>正在加载模型目录…</small> : models.slice(0, 8).map((model) => <article key={`${model.provider}/${model.id}`}><i/><span><b>{model.name || model.id}</b><small>{model.provider}/{model.id} · {model.contextWindow ? `${Math.round(model.contextWindow / 1000)}k tokens` : "上下文未知"}</small></span><em>{model.reasoning ? "支持思考" : "可用"}</em></article>)}</div></section><section className="model-settings-section services"><header><div><h2>我的模型服务</h2><p>连接自己的 Provider、API 地址和模型定义。</p></div>{agent && <button type="button" onClick={() => onConfigure(agent.id)}>＋ 添加模型服务</button>}</header>{agent ? <div className="model-service-summary"><Icon name="terminal"/><span><b>{agent.runtime}</b><small>配置保存在该设备的 ~/.pi/agent/models.json</small></span><button type="button" onClick={() => onConfigure(agent.id)}>管理</button></div> : <p>没有在线执行设备。</p>}</section></div>;
+}
+
+function ModuleSidebar({ view, settingsSection, onSettingsSection }: { view: View; settingsSection: SettingsSection; onSettingsSection: (section: SettingsSection) => void }) { const data: Record<View, string[]> = { agents: ["全部员工", "已停用"], settings: ["模型配置", "AI 设置", "执行设备", "系统权限", "外观显示", "版本信息"], tasks: [] }; return <><h2 className="module-title">{{ agents: "数字员工", settings: "设置", tasks: "任务" }[view]}</h2><div className="module-links">{data[view].map((item, index) => <button className={view === "settings" ? (settingsSection === "models" && index === 0) || (settingsSection === "runtimes" && index === 2) ? "active" : "" : index === 0 ? "active" : ""} key={item} onClick={() => { if (view === "settings" && index === 0) onSettingsSection("models"); if (view === "settings" && index === 2) onSettingsSection("runtimes"); }}>{item}</button>)}</div></>; }
+function ModulePage({ view, settingsSection, agents, runtimes, channels, activeAgentId, onAgentUpdated, onChooseModel, onRuntimeUpdated, onSettingsSection = () => undefined }: { view: View; settingsSection: SettingsSection; agents: AgentSummary[]; runtimes: RuntimeSummary[]; channels: ChannelSummary[]; activeAgentId: string; onAgentUpdated: (agent: AgentSummary) => void; onChooseModel: (agentId: string) => void; onRuntimeUpdated: (runtime: RuntimeSummary) => void; onSettingsSection?: (section: SettingsSection) => void }) { if (view === "agents") return <AgentCenter agents={agents} channels={channels} runtimes={runtimes} activeAgentId={activeAgentId} onAgentUpdated={onAgentUpdated} onChooseModel={onChooseModel}/>; if (view === "settings" && settingsSection === "models") return <ModelSettingsPage agents={agents} onConfigure={onChooseModel}/>; if (view === "settings") return <RuntimeCenter runtimes={runtimes} onBack={() => onSettingsSection("models")} onUpdated={onRuntimeUpdated}/>; return <div className="page"/>; }
+function Catalog() {
+  const entries = [
+    { category: "apps", group: "内置能力", title: "Models", description: "模型与服务提供方", detail: "模型沿用数字员工和当前对话的有效配置，不会在应用中心创建第二套配置。" },
+    { category: "skills", group: "内置能力", title: "Skills", description: "数字员工可调用的专业能力", detail: "Skills 会按任务需要加载专业说明，为数字员工提供可复用的工作流程。" },
+    { category: "skills", group: "内置能力", title: "Plugins", description: "扩展数字员工和工作台", detail: "插件由 Runtime 管理；安装与启停能力将在真实插件 API 接入后开放。" },
+    { category: "apps", group: "工作应用", title: "本地目录", description: "读取和修改项目文件", detail: "使用数字员工已获授权的工作目录，自动化不会扩大目录权限。" },
+    { category: "apps", group: "工作应用", title: "终端", description: "运行命令和开发工具", detail: "命令在关联 Runtime 上运行，并遵循现有审批与目录限制。" },
+    { category: "apps", group: "工作应用", title: "浏览器", description: "网页调研与信息采集", detail: "浏览能力由数字员工工具提供；连接器未配置前不会展示为可安装应用。" },
+  ];
+  const [selected, setSelected] = useState(entries[0]);
+  const [tab, setTab] = useState<"apps" | "skills" | "connectors">("apps");
+  const [query, setQuery] = useState("");
+  const visible = entries.filter((entry) => entry.category === tab && `${entry.title} ${entry.description}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  const detail = visible.find((entry) => entry.title === selected.title) ?? visible[0];
+  return <div className={`catalog-page ${detail ? "" : "without-detail"}`}><div className="catalog-list"><header className="catalog-toolbar"><nav><button type="button" className={tab === "apps" ? "active" : ""} onClick={() => setTab("apps")}>应用</button><button type="button" className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}>技能</button><button type="button" className={tab === "connectors" ? "active" : ""} onClick={() => setTab("connectors")}>连接器</button></nav><div><label><Icon name="search" size={14}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索当前能力"/></label><button type="button" disabled>添加</button><button type="button" disabled>管理</button></div></header>{["内置能力", "工作应用"].map((group) => { const groupEntries = visible.filter((entry) => entry.group === group); return groupEntries.length ? <section className="catalog" key={group}><h2>{group}</h2><div>{groupEntries.map((entry, index) => <article className={detail?.title === entry.title ? "selected" : ""} key={entry.title}><span><Icon name={index === 0 ? "apps" : index === 1 ? "automation" : "database"}/></span><div><b>{entry.title}</b><small>{entry.description}</small></div><button type="button" onClick={() => setSelected(entry)}>查看</button></article>)}</div></section> : null; })}{visible.length === 0 && <div className="catalog-empty"><Icon name={tab === "connectors" ? "globe" : "search"} size={28}/><b>{tab === "connectors" ? "还没有可用连接器" : "没有匹配的能力"}</b><p>{tab === "connectors" ? "连接真实 Connector API 后再开放安装，不展示不可用的占位应用。" : "换一个关键词试试。"}</p></div>}</div>{detail && <aside className="catalog-detail"><span><Icon name="apps" size={24}/></span><small>能力详情</small><h2>{detail.title}</h2><p>{detail.detail}</p><div><b>当前状态</b><em>已内置</em></div><button type="button" disabled>配置入口将在能力 API 接入后开放</button></aside>}</div>;
+}

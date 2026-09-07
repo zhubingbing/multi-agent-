@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: install start stop status dev dev-down dev-logs check
+.PHONY: install start stop status dev dev-down dev-logs cli check
 
 install:
 	corepack pnpm install
@@ -26,6 +26,10 @@ dev-down:
 dev-logs:
 	docker compose -f compose.dev.yaml logs -f
 
+cli:
+	@mkdir -p .bin
+	go build -o .bin/multi-agent ./cmd/cli
+
 check:
 	cd services/pi-host && npm test
 	cd services/pi-host && npm run typecheck
@@ -33,5 +37,5 @@ check:
 	cd apps/pi-web && ./node_modules/.bin/tsc --noEmit
 	cd apps/pi-web && ./node_modules/.bin/eslint components/AppShell.tsx components/ChatWindow.tsx components/ConversationAgentRunView.tsx components/ConversationProcessDetails.tsx components/ConversationShell.tsx components/ConversationTimeline.tsx components/GroupChat.tsx components/WorkspaceModeNav.tsx app/conversations/page.tsx app/group/page.tsx lib/authoritative-conversation.ts lib/conversation-turn-presentation.ts lib/conversation-adapter.ts lib/control-conversation-adapter.ts lib/conversation-minimap.ts lib/conversation-navigation.ts lib/group-conversation-state.ts
 	cd apps/workbench-web && ./node_modules/.bin/tsc -b --pretty false
-	GOMAXPROCS=1 go test -race -p 1 ./cmd/control ./cmd/runtime ./internal/host
-	go vet ./cmd/control ./cmd/runtime ./internal/host
+	GOMAXPROCS=1 go test -race -p 1 ./cmd/control ./cmd/runtime ./cmd/cli ./internal/host ./internal/automation ./internal/controlclient
+	go vet ./cmd/control ./cmd/runtime ./cmd/cli ./internal/host ./internal/automation ./internal/controlclient

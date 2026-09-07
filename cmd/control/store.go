@@ -49,13 +49,21 @@ type RuntimeNode struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
 	Status        string          `json:"status"`
+	ControlState  string          `json:"controlState"`
 	InstanceID    string          `json:"instanceId,omitempty"`
 	Version       string          `json:"version,omitempty"`
 	NodeVersion   string          `json:"nodeVersion,omitempty"`
 	PiVersion     string          `json:"piVersion,omitempty"`
 	OS            string          `json:"os,omitempty"`
 	Architecture  string          `json:"architecture,omitempty"`
-	Capabilities  json.RawMessage `json:"capabilities"`
+	Capabilities   json.RawMessage    `json:"capabilities"`
+	Models         []runtimeModelInfo `json:"-"`
+	Skills         []runtimeSkillInfo `json:"-"`
+	Tools          []runtimeToolInfo  `json:"-"`
+	MCPServers     []map[string]any   `json:"-"`
+	MCPSupported   bool               `json:"mcpSupported"`
+	InventoryError string             `json:"inventoryError,omitempty"`
+	InventoryAt    int64              `json:"inventoryAt,omitempty"`
 	LastSeenAt    int64           `json:"lastSeenAt"`
 	ConfigVersion int64           `json:"configVersion"`
 }
@@ -175,6 +183,7 @@ func (s *Store) initialize(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'offline',
+			control_state TEXT NOT NULL DEFAULT 'active',
 			instance_id TEXT NOT NULL DEFAULT '',
 			version TEXT NOT NULL DEFAULT '',
 			node_version TEXT NOT NULL DEFAULT '',
@@ -182,9 +191,33 @@ func (s *Store) initialize(ctx context.Context) error {
 			os TEXT NOT NULL DEFAULT '',
 			architecture TEXT NOT NULL DEFAULT '',
 			capabilities_json BLOB NOT NULL DEFAULT '{}',
+			models_json BLOB NOT NULL DEFAULT '[]',
+			skills_json BLOB NOT NULL DEFAULT '[]',
+			tools_json BLOB NOT NULL DEFAULT '[]',
+			mcp_json BLOB NOT NULL DEFAULT '[]',
+			mcp_supported INTEGER NOT NULL DEFAULT 0,
+			inventory_error TEXT NOT NULL DEFAULT '',
+			inventory_at INTEGER NOT NULL DEFAULT 0,
 			last_seen_at INTEGER NOT NULL,
 			config_version INTEGER NOT NULL DEFAULT 1
 		)`,
+		`CREATE TABLE IF NOT EXISTS runtime_pairing_tokens (
+			id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at INTEGER NOT NULL,
+			used_at INTEGER,
+			revoked_at INTEGER,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS runtime_credentials (
+			id TEXT PRIMARY KEY,
+			runtime_id TEXT NOT NULL,
+			credential_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			last_used_at INTEGER,
+			revoked_at INTEGER
+		)`,
+		`CREATE INDEX IF NOT EXISTS runtime_credentials_runtime ON runtime_credentials(runtime_id)`,
 		`CREATE TABLE IF NOT EXISTS agents (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -320,6 +353,9 @@ func (s *Store) initialize(ctx context.Context) error {
 			return fmt.Errorf("initialize sqlite: %w", err)
 		}
 	}
+	if err := s.ensureRuntimeNodeColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureRunColumns(ctx); err != nil {
 		return err
 	}
@@ -413,6 +449,31 @@ func (s *Store) GetParticipantCursor(ctx context.Context, conversationID, partic
 		return cursor, nil
 	}
 	return cursor, err
+}
+
+func (s *Store) ensureRuntimeNodeColumns(ctx context.Context) error {
+	columns := map[string]string{
+		"control_state": "TEXT NOT NULL DEFAULT 'active'", "models_json": "BLOB NOT NULL DEFAULT '[]'",
+		"skills_json": "BLOB NOT NULL DEFAULT '[]'", "tools_json": "BLOB NOT NULL DEFAULT '[]'", "mcp_json": "BLOB NOT NULL DEFAULT '[]'",
+		"mcp_supported": "INTEGER NOT NULL DEFAULT 0", "inventory_error": "TEXT NOT NULL DEFAULT ''", "inventory_at": "INTEGER NOT NULL DEFAULT 0",
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(runtime_nodes)`)
+	if err != nil { return err }
+	defer rows.Close()
+	found := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil { return err }
+		found[name] = true
+	}
+	if err := rows.Err(); err != nil { return err }
+	for name, definition := range columns {
+		if found[name] { continue }
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runtime_nodes ADD COLUMN `+name+` `+definition); err != nil { return fmt.Errorf("add runtime node %s: %w", name, err) }
+	}
+	return nil
 }
 
 func (s *Store) ensureRunColumns(ctx context.Context) error {
@@ -700,7 +761,7 @@ func (s *Store) UpsertRuntimeNode(ctx context.Context, registration runtimeRegis
 	_, err = s.db.ExecContext(ctx, `INSERT INTO runtime_nodes
 		(id,name,status,instance_id,version,node_version,pi_version,os,architecture,capabilities_json,last_seen_at,config_version)
 		VALUES(?,?,'online',?,?,?,?,?,?,?,?,1)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name,status='online',instance_id=excluded.instance_id,
+		ON CONFLICT(id) DO UPDATE SET status='online',instance_id=excluded.instance_id,
 		version=excluded.version,node_version=excluded.node_version,pi_version=excluded.pi_version,os=excluded.os,
 		architecture=excluded.architecture,capabilities_json=excluded.capabilities_json,last_seen_at=excluded.last_seen_at`,
 		registration.RuntimeID, registration.Name, registration.InstanceID, registration.Version,
@@ -710,7 +771,7 @@ func (s *Store) UpsertRuntimeNode(ctx context.Context, registration runtimeRegis
 }
 
 func (s *Store) ListRuntimeNodes(ctx context.Context) ([]RuntimeNode, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,instance_id,version,node_version,pi_version,os,architecture,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,control_state,instance_id,version,node_version,pi_version,os,architecture,
 		capabilities_json,last_seen_at,config_version FROM runtime_nodes ORDER BY name,id`)
 	if err != nil {
 		return nil, err
@@ -720,7 +781,7 @@ func (s *Store) ListRuntimeNodes(ctx context.Context) ([]RuntimeNode, error) {
 	for rows.Next() {
 		var node RuntimeNode
 		var capabilities []byte
-		if err := rows.Scan(&node.ID, &node.Name, &node.Status, &node.InstanceID, &node.Version,
+		if err := rows.Scan(&node.ID, &node.Name, &node.Status, &node.ControlState, &node.InstanceID, &node.Version,
 			&node.NodeVersion, &node.PiVersion, &node.OS, &node.Architecture, &capabilities,
 			&node.LastSeenAt, &node.ConfigVersion); err != nil {
 			return nil, err
@@ -729,6 +790,70 @@ func (s *Store) ListRuntimeNodes(ctx context.Context) ([]RuntimeNode, error) {
 		result = append(result, node)
 	}
 	return result, rows.Err()
+}
+
+func scanRuntimeNode(scanner interface{ Scan(...any) error }) (RuntimeNode, error) {
+	var node RuntimeNode
+	var capabilities []byte
+	err := scanner.Scan(&node.ID, &node.Name, &node.Status, &node.ControlState, &node.InstanceID, &node.Version,
+		&node.NodeVersion, &node.PiVersion, &node.OS, &node.Architecture, &capabilities, &node.LastSeenAt, &node.ConfigVersion)
+	node.Capabilities = append(json.RawMessage(nil), capabilities...)
+	return node, err
+}
+
+const runtimeNodeSelect = `SELECT id,name,status,control_state,instance_id,version,node_version,pi_version,os,architecture,capabilities_json,last_seen_at,config_version FROM runtime_nodes`
+
+func (s *Store) GetRuntimeNode(ctx context.Context, id string) (RuntimeNode, error) {
+	return scanRuntimeNode(s.db.QueryRowContext(ctx, runtimeNodeSelect+` WHERE id=?`, strings.TrimSpace(id)))
+}
+
+func (s *Store) SetRuntimeControlState(ctx context.Context, id, state string) (RuntimeNode, error) {
+	state = strings.TrimSpace(state)
+	if state != "active" && state != "draining" && state != "disabled" {
+		return RuntimeNode{}, errors.New("invalid runtime control state")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE runtime_nodes SET control_state=?,config_version=config_version+1 WHERE id=?`, state, strings.TrimSpace(id))
+	if err != nil {
+		return RuntimeNode{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return RuntimeNode{}, err
+	}
+	if changed == 0 {
+		return RuntimeNode{}, sql.ErrNoRows
+	}
+	return s.GetRuntimeNode(ctx, id)
+}
+
+func (s *Store) RenameRuntimeNode(ctx context.Context, id, name string) (RuntimeNode, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return RuntimeNode{}, errors.New("runtime name is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RuntimeNode{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE runtime_nodes SET name=?,config_version=config_version+1 WHERE id=?`, name, strings.TrimSpace(id))
+	if err != nil {
+		return RuntimeNode{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return RuntimeNode{}, err
+	}
+	if changed == 0 {
+		return RuntimeNode{}, sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agents SET runtime_name=? WHERE runtime_id=?`, name, strings.TrimSpace(id)); err != nil {
+		return RuntimeNode{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RuntimeNode{}, err
+	}
+	return s.GetRuntimeNode(ctx, id)
 }
 
 func (s *Store) UpdateAgentConfig(ctx context.Context, agentID string, patch AgentConfigPatch) (AgentInfo, error) {

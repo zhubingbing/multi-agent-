@@ -43,6 +43,7 @@ services:
       GOPROXY: https://goproxy.cn,direct
       HOME: /root
       MULTI_AGENT_SERVER_URL: ws://control:30146/api/multi-agent/runtime/ws
+      MULTI_AGENT_CONTROL_URL: http://control:30146
       MULTI_AGENT_RUNTIME_ID: runtime-dev
       MULTI_AGENT_RUNTIME_NAME: Dev Runtime
       MULTI_AGENT_AGENT_ID: dev-pi

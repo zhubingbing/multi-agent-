@@ -1,8 +1,7 @@
-import { memo, useMemo, useState, type ReactNode } from "react";
+import { memo, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { presentAssistantTurn, type AgentMessage, type AssistantMessage, type GroupAgentRun, type ToolResultMessage, type UserMessage } from "@multi-agent/chat-core";
 import { MarkdownMessage } from "./MarkdownMessage";
-
-type Agent = { id: string; name: string; runtime?: string; cwd?: string; online?: boolean };
+import type { AgentSummary } from "./contracts/control-api";
 
 function formatTime(timestamp?: number) {
   if (!timestamp) return "";
@@ -51,10 +50,10 @@ export const UserMessageView = memo(function UserMessageView({ message, onEdit, 
 
 function ProcessDetails({ count, tools, running, children }: { count: number; tools: number; running: boolean; children: ReactNode }) {
   const [expanded, setExpanded] = useState(running);
-  return <div className="process-panel"><button type="button" onClick={() => setExpanded((value) => !value)}><span className={expanded ? "expanded" : ""}>›</span>执行过程 · {count} 条消息{tools ? ` · ${tools} 次工具调用` : ""}</button>{expanded && <div>{children}</div>}</div>;
+  return <div className="process-panel"><button type="button" onClick={() => setExpanded((value) => !value)}><span className={expanded ? "expanded" : ""}>›</span>执行过程 · {count} 条消息{tools ? ` · ${tools} 次工具调用` : ""}{running ? " · 运行中" : ""}</button>{expanded && <div>{children}</div>}</div>;
 }
 
-export function AgentRunView({ run, agent, onControl, onReply }: { run: GroupAgentRun; agent?: Agent; onControl?: (agentId: string, type: "steer" | "follow_up" | "abort", message?: string) => void; onReply?: (text: string) => void }) {
+export function AgentRunView({ run, agent, onControl, onReply }: { run: GroupAgentRun; agent?: AgentSummary; onControl?: (agentId: string, type: "steer" | "follow_up" | "abort", message?: string) => void; onReply?: (text: string) => void }) {
   const results = useMemo(() => new Map(run.messages.filter((message): message is ToolResultMessage => message.role === "toolResult").map((message) => [message.toolCallId, message])), [run.messages]);
   const presentation = run.settled ? presentAssistantTurn(run.messages) : { processMessages: run.messages.filter((message) => message.role === "assistant"), finalProcessMessage: null, finalAnswerMessage: null };
   const process = [...presentation.processMessages, ...(presentation.finalProcessMessage ? [presentation.finalProcessMessage] : [])];
@@ -62,10 +61,19 @@ export function AgentRunView({ run, agent, onControl, onReply }: { run: GroupAge
   const toolCount = [...process, ...(live ? [live] : [])].reduce((count, message) => message.role === "assistant" ? count + message.content.filter((block) => block.type === "toolCall").length : count, 0);
   const final = run.finalMessage ?? presentation.finalAnswerMessage;
   const finalText = final ? textContent(final) : "";
-  const controlPrompt = (type: "steer" | "follow_up") => { const value = window.prompt(type === "steer" ? "立即调整方向" : "完成后继续"); if (value?.trim()) onControl?.(run.agentId, type, value.trim()); };
-  return <article className="conversation-run"><header><span className="run-avatar">◉</span><b>{agent?.name || run.agentId}</b><small>{agent?.runtime || "Runtime"}</small><em className={run.error ? "failed" : run.settled ? "done" : run.status || "running"}>{run.error ? "失败" : run.status === "queued" ? "等待中" : run.settled ? "已完成" : "运行中"}</em>{!run.settled && run.status !== "queued" && onControl && <div className="run-controls"><button type="button" onClick={() => controlPrompt("steer")}>调整</button><button type="button" onClick={() => controlPrompt("follow_up")}>继续</button><button type="button" className="danger" onClick={() => onControl(run.agentId, "abort")}>停止</button></div>}</header>
+  const finalError = final?.stopReason === "error" ? final.errorMessage || "模型请求失败" : "";
+  const [controlType, setControlType] = useState<"steer" | "follow_up" | null>(null);
+  const [controlText, setControlText] = useState("");
+  const submitControl = (event: FormEvent) => {
+    event.preventDefault();
+    if (!controlType || !controlText.trim()) return;
+    onControl?.(run.agentId, controlType, controlText.trim());
+    setControlText(""); setControlType(null);
+  };
+  return <article className="conversation-run"><header><span className="run-avatar">◉</span><b>{agent?.name || run.agentId}</b><small>{agent?.runtime || "Runtime"}</small><em className={run.error || finalError ? "failed" : run.settled ? "done" : run.status || "running"}>{run.error || finalError ? "失败" : run.status === "queued" ? "等待中" : run.settled ? "已完成" : "运行中"}</em>{!run.settled && run.status !== "queued" && onControl && <div className="run-controls"><button type="button" className={controlType === "steer" ? "active" : ""} onClick={() => setControlType((value) => value === "steer" ? null : "steer")}>调整</button><button type="button" className={controlType === "follow_up" ? "active" : ""} onClick={() => setControlType((value) => value === "follow_up" ? null : "follow_up")}>继续</button><button type="button" className="danger" onClick={() => onControl(run.agentId, "abort")}>停止</button></div>}</header>
+    {controlType && <form className="run-control-composer" onSubmit={submitControl}><input autoFocus value={controlText} onChange={(event) => setControlText(event.target.value)} placeholder={controlType === "steer" ? "输入调整要求，立即改变当前执行方向" : "输入后续要求，当前执行完成后继续"}/><button type="button" onClick={() => { setControlType(null); setControlText(""); }}>取消</button><button disabled={!controlText.trim()}>{controlType === "steer" ? "发送调整" : "加入后续"}</button></form>}
     {(process.length > 0 || live) && <ProcessDetails count={process.length + (live ? 1 : 0)} tools={toolCount} running={!run.settled}>{process.map((message: AgentMessage, index) => message.role === "assistant" ? <AssistantContent key={index} message={message} results={results}/> : null)}{live && <AssistantContent message={live} streaming results={results}/>}</ProcessDetails>}
     {final && <div className="final-answer"><AssistantContent message={final} results={results}/><footer><span>{[final.provider, final.model, usage(final), formatTime(final.timestamp)].filter(Boolean).join(" · ")}</span><button type="button" onClick={() => void navigator.clipboard.writeText(finalText)}>复制</button>{onReply && finalText && <button type="button" onClick={() => onReply(finalText)}>回复</button>}</footer></div>}
-    {run.error && <div className="run-error">{run.error}</div>}
+    {(run.error || finalError) && <div className="run-error">{run.error || finalError}</div>}
   </article>;
 }

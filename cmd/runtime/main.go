@@ -35,17 +35,54 @@ type agentInfo struct {
 	DesiredCwd      string `json:"desiredCwd,omitempty"`
 }
 
+type modelInfo struct {
+	Provider      string `json:"provider"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Reasoning     bool   `json:"reasoning"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
+	MaxTokens     int    `json:"maxTokens,omitempty"`
+}
+
+type modelCatalog struct {
+	Models []modelInfo `json:"models"`
+	Error  string      `json:"error,omitempty"`
+}
+
+type runtimeSkill struct {
+	Name                   string `json:"name"`
+	Description            string `json:"description,omitempty"`
+	FilePath               string `json:"filePath,omitempty"`
+	Source                 string `json:"source,omitempty"`
+	DisableModelInvocation bool   `json:"disableModelInvocation,omitempty"`
+}
+
+type runtimeTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Source      string `json:"source,omitempty"`
+}
+
+type capabilityInventory struct {
+	Skills           []runtimeSkill   `json:"skills"`
+	SkillDiagnostics []map[string]any `json:"skillDiagnostics,omitempty"`
+	Tools            []runtimeTool    `json:"tools"`
+	MCPServers       []map[string]any `json:"mcpServers"`
+	MCPSupported     bool             `json:"mcpSupported"`
+}
+
 type command struct {
-	Type           string `json:"type"`
-	RuntimeSeq     uint64 `json:"runtimeSeq"`
-	RequestID      string `json:"requestId"`
-	RunID          string `json:"runId"`
-	ConversationID string `json:"conversationId"`
-	AgentID        string `json:"agentId"`
-	Message        string `json:"message"`
-	Cwd            string `json:"cwd"`
-	Model          string `json:"model"`
-	ThinkingLevel  string `json:"thinkingLevel"`
+	Type           string          `json:"type"`
+	RuntimeSeq     uint64          `json:"runtimeSeq"`
+	RequestID      string          `json:"requestId"`
+	RunID          string          `json:"runId"`
+	ConversationID string          `json:"conversationId"`
+	AgentID        string          `json:"agentId"`
+	Message        string          `json:"message"`
+	Cwd            string          `json:"cwd"`
+	Model          string          `json:"model"`
+	ThinkingLevel  string          `json:"thinkingLevel"`
+	Config         json.RawMessage `json:"config,omitempty"`
 }
 
 type activeRunInfo struct {
@@ -210,6 +247,20 @@ func main() {
 	})
 	defer unsubscribe()
 
+	var catalog modelCatalog
+	catalogContext, catalogCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := piHost.Call(catalogContext, "models.list", map[string]any{}, &catalog); err != nil {
+		log.Printf("load Pi model catalog: %v", err)
+	}
+	catalogCancel()
+
+	var inventory capabilityInventory
+	inventoryContext, inventoryCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := piHost.Call(inventoryContext, "capabilities.list", map[string]any{"cwd": absoluteCwd}, &inventory); err != nil {
+		log.Printf("load Pi capability inventory: %v", err)
+	}
+	inventoryCancel()
+
 	backoff := time.Second
 	for ctx.Err() == nil {
 		header := http.Header{"Authorization": []string{"Bearer " + *token}}
@@ -243,7 +294,14 @@ func main() {
 				DesiredProvider: envOr("PI_PROVIDER", ""), DesiredModel: envOr("PI_MODEL", ""),
 				DesiredThinking: envOr("PI_REASONING_LEVEL", ""), DesiredCwd: absoluteCwd,
 			}},
-			"activeRuns": reconciliationRunSnapshot(&routes, relay),
+			"models":           catalog.Models,
+			"modelError":       catalog.Error,
+			"skills":           inventory.Skills,
+			"skillDiagnostics": inventory.SkillDiagnostics,
+			"tools":            inventory.Tools,
+			"mcpServers":       inventory.MCPServers,
+			"mcpSupported":     inventory.MCPSupported,
+			"activeRuns":       reconciliationRunSnapshot(&routes, relay),
 		}
 		if err := writer.write(registration); err != nil {
 			_ = conn.Close()
@@ -283,7 +341,7 @@ func main() {
 				relay.acknowledge(cmd.RuntimeSeq)
 				continue
 			}
-			if (cmd.Type != "prompt" && cmd.Type != "steer" && cmd.Type != "follow_up" && cmd.Type != "abort" && cmd.Type != "close" && cmd.Type != "replace") || cmd.AgentID != *agentID {
+			if (cmd.Type != "prompt" && cmd.Type != "steer" && cmd.Type != "follow_up" && cmd.Type != "abort" && cmd.Type != "close" && cmd.Type != "replace" && cmd.Type != "model_config_get" && cmd.Type != "model_config_save" && cmd.Type != "model_config_discover" && cmd.Type != "model_config_test") || cmd.AgentID != *agentID {
 				continue
 			}
 			go runCommand(ctx, piHost, relay, cmd, &routes, absoluteCwd)
@@ -295,6 +353,41 @@ func main() {
 }
 
 func runCommand(ctx context.Context, piHost *host.Client, relay *eventRelay, cmd command, routes *sync.Map, defaultCwd string) {
+	if cmd.Type == "model_config_get" || cmd.Type == "model_config_save" || cmd.Type == "model_config_discover" || cmd.Type == "model_config_test" {
+		method := "models.config.get"
+		params := map[string]any{}
+		if cmd.Type == "model_config_save" || cmd.Type == "model_config_discover" || cmd.Type == "model_config_test" {
+			if cmd.Type == "model_config_save" {
+				method = "models.config.save"
+			} else if cmd.Type == "model_config_discover" {
+				method = "models.config.discover"
+			} else {
+				method = "models.config.test"
+			}
+			var config any
+			if err := json.Unmarshal(cmd.Config, &config); err != nil {
+				relay.enqueue(outboundRuntimeEvent{Type: "model_config_response", AgentID: cmd.AgentID, RequestID: cmd.RequestID, Error: err.Error()})
+				return
+			}
+			if cmd.Type == "model_config_save" {
+				params["config"] = config
+			} else if values, ok := config.(map[string]any); ok {
+				params = values
+			} else {
+				relay.enqueue(outboundRuntimeEvent{Type: "model_config_response", AgentID: cmd.AgentID, RequestID: cmd.RequestID, Error: "discovery request must be an object"})
+				return
+			}
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		var result json.RawMessage
+		if err := piHost.Call(callCtx, method, params, &result); err != nil {
+			relay.enqueue(outboundRuntimeEvent{Type: "model_config_response", AgentID: cmd.AgentID, RequestID: cmd.RequestID, Error: err.Error()})
+			return
+		}
+		relay.enqueue(outboundRuntimeEvent{Type: "model_config_response", AgentID: cmd.AgentID, RequestID: cmd.RequestID, Event: result})
+		return
+	}
 	sessionKey := cmd.ConversationID + "::" + cmd.AgentID
 	if cmd.Type == "prompt" && !reserveSessionRun(routes, sessionKey, sessionRoute{
 		conversationID: cmd.ConversationID,

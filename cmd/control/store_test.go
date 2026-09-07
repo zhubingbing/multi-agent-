@@ -653,3 +653,69 @@ func TestReconcileRuntimeRunsRestoresReportedAndFailsMissingRuns(t *testing.T) {
 		t.Fatalf("missing run = (%q, %q), want failed with an explanation", missingStatus, missingError)
 	}
 }
+
+func TestRuntimeNodeControlStatePersistsAcrossRegistration(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	registration := runtimeRegistration{RuntimeID: "runtime-a", InstanceID: "instance-1", Name: "Runtime A", Capabilities: map[string]bool{"prompt": true}}
+	if err := store.UpsertRuntimeNode(ctx, registration); err != nil {
+		t.Fatal(err)
+	}
+	node, err := store.GetRuntimeNode(ctx, "runtime-a")
+	if err != nil || node.ControlState != "active" {
+		t.Fatalf("initial node = %#v, %v", node, err)
+	}
+	node, err = store.SetRuntimeControlState(ctx, "runtime-a", "draining")
+	if err != nil || node.ControlState != "draining" {
+		t.Fatalf("drain = %#v, %v", node, err)
+	}
+	registration.InstanceID = "instance-2"
+	if err := store.UpsertRuntimeNode(ctx, registration); err != nil {
+		t.Fatal(err)
+	}
+	node, err = store.GetRuntimeNode(ctx, "runtime-a")
+	if err != nil || node.ControlState != "draining" || node.InstanceID != "instance-2" {
+		t.Fatalf("re-registered node = %#v, %v", node, err)
+	}
+	node, err = store.RenameRuntimeNode(ctx, "runtime-a", "Build Node")
+	if err != nil || node.Name != "Build Node" {
+		t.Fatalf("rename = %#v, %v", node, err)
+	}
+	if _, err := store.SetRuntimeControlState(ctx, "runtime-a", "broken"); err == nil {
+		t.Fatal("invalid control state accepted")
+	}
+}
+
+func TestRuntimePairingIsSingleUseAndCredentialIsBound(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pairing, err := store.CreateRuntimePairing(ctx, time.Minute)
+	if err != nil || pairing.Token == "" {
+		t.Fatalf("pairing = %#v, %v", pairing, err)
+	}
+	credential, err := store.ExchangeRuntimePairing(ctx, pairing.Token, "runtime-a")
+	if err != nil || credential.Secret == "" {
+		t.Fatalf("credential = %#v, %v", credential, err)
+	}
+	if _, err := store.ExchangeRuntimePairing(ctx, pairing.Token, "runtime-b"); err == nil {
+		t.Fatal("pairing token reused")
+	}
+	runtimeID, err := store.VerifyRuntimeCredential(ctx, credential.Secret)
+	if err != nil || runtimeID != "runtime-a" {
+		t.Fatalf("verified runtime = %q, %v", runtimeID, err)
+	}
+	if err := store.RevokeRuntimeCredentials(ctx, "runtime-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.VerifyRuntimeCredential(ctx, credential.Secret); err == nil {
+		t.Fatal("revoked credential accepted")
+	}
+}

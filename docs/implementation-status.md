@@ -4,6 +4,8 @@
 
 ## 当前阶段
 
+**产品文案已统一采用“数字员工”；代码、协议和数据库中继续使用稳定的 `agent` 技术名。数字员工的 Owner/Workspace/Runtime/Skills/Tools、私聊/群聊与有界员工间协作定义见 [`digital-employee-design.md`](digital-employee-design.md)。**
+
 **当前优先后端基础：权威数据模型、数字员工调度、恢复与安全边界；前端只保持可通信、可工作和必要控制。Phase 0 在线链路已收口，Phase 1/2 后端能力持续推进。**
 
 最终产品入口是 pi-web 正式页面中的统一 Conversation，不是 `/group`。`/group` 继续作为 Control/Runtime/多 Agent 协议诊断页，直到正式 Conversation 数据源接入 pi-web 主页面。
@@ -85,7 +87,7 @@
 - [x] 新 Native Session 按 desired provider/model/thinking/cwd 明确打开，不再依赖 Pi 默认模型回落
 - [x] 正式页面展示 Binding 详情并提供 Replace 按钮；Agent 运行中或 Runtime 离线时禁用
 - [x] Provider 403 已修复并真实验证：`custom-openai/gpt-5.6-sol`、`stopReason=stop`、正文 `PROVIDER_OK`
-- [ ] 已打开 Session 的配置变更通过 Replace Session/generation 生效
+- [x] 已打开 Session 的配置变更通过 Replace Session/generation 生效
 - [x] Agent 最终 Message 默认 Reply 触发它的 Member Message；用户可直接 Reply Agent 最终答案
 - [x] Member/Agent Message 中 `@agent-id`、`@name`、`@handle` 事务性解析为权威 Mention 元数据，并校验 Channel roster
 - [x] Agent Mention 事务性写入 durable `employee_inbox`；目标数字员工空闲时自动创建 Reply Run
@@ -116,7 +118,19 @@
 - [x] 真实权威对账验证：Member Message + Agent Message 共 2 条，Agent Message ID/Run ID 与 Turn `finalMessageId` 一致
 - [x] 在同一时间线呈现不同 Agent 作者、Runtime 和独立 Run 状态
 - [x] 将 Steer、Follow-up、Abort 精确路由到单个 Agent，并保留批量控制
-- [ ] 保持 Markdown、Thinking、工具、Usage、文件跳转和流式体验
+- [x] 保持 Markdown、Thinking、工具、Usage、文件写入提示和流式体验
+- [x] 模型详情恢复 pi-web 的真实“测试”按钮：以当前未保存的 Provider/Model 表单创建隔离 ModelRuntime，发出最小请求并显示延迟、响应或兼容性错误；真实验证 `model-test-ok=true`
+- [x] Workbench Chat 输入区支持独立点击模型，按当前 Agent 所在 Runtime 发现真实可用模型，支持搜索、Provider 筛选和能力/上下文展示；Chat 内切换通过带模型覆盖参数的 Binding Replace 仅替换当前 Conversation，不修改 Agent 默认模型或其他任务 Session；Agent 页面只展示该数字员工所在 Runtime 的可用模型
+- [x] Chat 模型选择器按 `chat-模型切换.png` 改为输入框上方紧凑浮层，并提供“配置自定义模型”入口
+- [x] 按 `模型.png` / `模型2.png` 迁移 Runtime 模型配置面板：Provider/Model 树、Base URL、API 协议、API Key、模型能力与 token 规格
+- [x] 按 `模型3.png` 接通设置 → 模型配置总览和“我的模型服务”，Agent 详情也提供明确的添加/切换模型入口
+- [x] 模型配置通过 Control → Runtime → Pi Host 写入对应设备的 `~/.pi/agent/models.json` 并刷新 ModelRuntime；API Key 返回浏览器前脱敏，空值保存保留既有密钥
+- [x] Provider 配置支持根据 Base URL、API 协议和已有/新 API Key 调用 `/models` 发现 Model ID，结果进入“模型详情表单”的可用模型下拉框，由用户选择后自动填充 ID/Name，不在 Chat 中承担模型导入；真实自定义端点验证发现 55 个模型
+- [x] 模型详情支持覆盖 Provider API 协议，解决同一 OpenAI-compatible 网关中 Responses 与 Chat Completions 模型兼容性不同的问题；Assistant terminal error 在 Chat 中显示为失败和真实 Provider 错误，不再显示空白“已完成”
+- [x] Workbench Chat 的 Agent 按钮与模型按钮职责分离；Agent 按钮打开分身设置，模型按钮只打开模型目录
+- [x] Chat 输入历史迁移：保存最近 50 条去重输入，支持上下方向键召回
+- [x] Run 的 Steer/Follow-up 从浏览器原生 `prompt` 迁移为当前时间线内的控制输入框
+- [ ] 图片/文件附件、Slash Command、Compaction、Minimap、文件跳转与 Tool Preset/授权策略完整迁移
 
 ## 后续里程碑
 

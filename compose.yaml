@@ -26,6 +26,7 @@ services:
     image: multi-agent-runtime:dev
     environment:
       MULTI_AGENT_SERVER_URL: ws://control:30146/api/multi-agent/runtime/ws
+      MULTI_AGENT_CONTROL_URL: http://control:30146
       MULTI_AGENT_RUNTIME_TOKEN: multi-agent-dev
       MULTI_AGENT_RUNTIME_ID: runtime-docker
       MULTI_AGENT_RUNTIME_NAME: Docker Runtime

@@ -40,6 +40,44 @@ test("an older persisted snapshot does not discard newer live messages", () => {
   assert.deepEqual(merged[0].runs[0].stream, live);
 });
 
+test("persisted tool calls are normalized before replacing live messages", () => {
+  const current = [turn("turn-1", run({
+    messages: [assistant("working")],
+    stream: live,
+  }))];
+  const storedAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }],
+    timestamp: 2,
+  };
+  const stored = [turn("turn-1", run({ messages: [storedAssistant], settled: true }))];
+
+  const merged = mergeGroupConversationTurns(current, stored);
+  assert.deepEqual(merged[0].runs[0].messages[0].content[0], {
+    type: "toolCall",
+    toolCallId: "call-1",
+    toolName: "read",
+    input: { path: "README.md" },
+  });
+  assert.equal(merged[0].runs[0].settled, true);
+  assert.deepEqual(merged[0].runs[0].stream, idle);
+});
+
+test("fresh persisted turns normalize tool calls", () => {
+  const storedAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-2", name: "bash", arguments: { command: "pwd" } }],
+  };
+  const merged = mergeGroupConversationTurns([], [turn("turn-1", run({ messages: [storedAssistant], settled: true }))]);
+
+  assert.deepEqual(merged[0].runs[0].messages[0].content[0], {
+    type: "toolCall",
+    toolCallId: "call-2",
+    toolName: "bash",
+    input: { command: "pwd" },
+  });
+});
+
 test("optimistic turns absent from the snapshot are retained", () => {
   const optimistic = turn("turn-new", run({ stream: live }));
   const merged = mergeGroupConversationTurns([optimistic], []);

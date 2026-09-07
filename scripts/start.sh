@@ -35,6 +35,9 @@ cd "$ROOT/apps/workbench-web"
 cd "$ROOT"
 go build -o "$BIN_DIR/control" ./cmd/control
 go build -o "$BIN_DIR/runtime" ./cmd/runtime
+go build -o "$BIN_DIR/multi-agent" ./cmd/cli
+export PATH="$BIN_DIR:$PATH"
+export MULTI_AGENT_CONTROL_URL="http://127.0.0.1:30146"
 
 nohup "$BIN_DIR/control" -addr 0.0.0.0:30146 -web-upstream http://127.0.0.1:30148 >"$RUN_DIR/control.log" 2>&1 &
 echo $! >"$RUN_DIR/control.pid"

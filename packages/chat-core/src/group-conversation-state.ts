@@ -1,4 +1,5 @@
 import { INITIAL_STREAMING_STATE, type StreamingState } from "./streaming-message";
+import { normalizeToolCalls } from "./normalize";
 import type { AgentMessage, AssistantMessage, UserMessage } from "./types";
 
 export type GroupAgentRun = {
@@ -30,20 +31,31 @@ export function mergeGroupConversationTurns(
     if (!liveTurn) {
       return {
         ...turn,
-        runs: turn.runs.map((run) => ({ ...run, stream: INITIAL_STREAMING_STATE })),
+        runs: turn.runs.map((run) => ({
+          ...run,
+          messages: run.messages.map(normalizeToolCalls),
+          stream: INITIAL_STREAMING_STATE,
+        })),
       };
     }
     currentTurns.delete(turn.id);
     const liveRuns = new Map(liveTurn.runs.map((run) => [run.id, run]));
     const runs = turn.runs.map((run) => {
       const liveRun = liveRuns.get(run.id);
-      if (!liveRun) return { ...run, stream: INITIAL_STREAMING_STATE };
+      if (!liveRun) {
+        return {
+          ...run,
+          messages: run.messages.map(normalizeToolCalls),
+          stream: INITIAL_STREAMING_STATE,
+        };
+      }
       liveRuns.delete(run.id);
       const settled = run.settled || liveRun.settled;
+      const messages = run.messages.length >= liveRun.messages.length ? run.messages : liveRun.messages;
       return {
         ...liveRun,
         ...run,
-        messages: run.messages.length >= liveRun.messages.length ? run.messages : liveRun.messages,
+        messages: messages.map(normalizeToolCalls),
         settled,
         stream: settled ? INITIAL_STREAMING_STATE : liveRun.stream,
         error: run.error || liveRun.error,

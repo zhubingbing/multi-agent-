@@ -1,13 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { captureScrollDistance, getLiveFollowAttached, getNextVisibleCount, getVisibleRenderWindow, restoreScrollTop, VISIBLE_PAGE_SIZE, type GroupConversationTurn } from "@multi-agent/chat-core";
 import { AgentRunView, UserMessageView } from "./WorkbenchMessageView";
-
-type Agent = { id: string; name: string; runtime?: string; cwd?: string; online?: boolean };
+import { RenderErrorBoundary } from "./RenderErrorBoundary";
+import type { AgentSummary } from "./contracts/control-api";
 
 export function ConversationTimeline({ conversationId, turns, agents, onEdit, onReply, onControl }: {
   conversationId: string;
   turns: GroupConversationTurn[];
-  agents: Agent[];
+  agents: AgentSummary[];
   onEdit?: (text: string) => void;
   onReply?: (turnId: string, messageId: string, text: string) => void;
   onControl?: (agentId: string, type: "steer" | "follow_up" | "abort", message?: string) => void;
@@ -50,11 +50,17 @@ export function ConversationTimeline({ conversationId, turns, agents, onEdit, on
     previousScrollTopRef.current = target.scrollTop;
   }}>
     {hasMore && <div className="load-history"><button type="button" onClick={revealEarlier}>加载更早消息</button></div>}
-    {turns.length === 0 && <div className="timeline-empty">描述目标，AI 分身会理解任务、使用工具并持续推进。</div>}
+    {turns.length === 0 && <div className="timeline-empty">描述目标，数字员工会理解任务、使用工具并持续推进。</div>}
     {visible.map((turn) => <section className="conversation-turn" id={turn.id} key={turn.id}>
       {turn.user.replyToText && <div className="reply-reference">回复：{turn.user.replyToText}</div>}
       <UserMessageView message={turn.user} onEdit={onEdit} onReply={onReply ? (text) => onReply(turn.id, `message-${turn.id}`, text) : undefined}/>
-      {turn.runs.map((run) => <AgentRunView key={run.id} run={run} agent={agents.find((agent) => agent.id === run.agentId)} onControl={onControl} onReply={onReply ? (text) => onReply(turn.id, run.finalMessageId || `message-${run.id}`, text) : undefined}/>) }
+      {turn.runs.map((run) => <RenderErrorBoundary
+        key={run.id}
+        variant="run"
+        resetKey={`${run.id}:${run.messages.length}:${run.settled}:${run.error ?? ""}`}
+      >
+        <AgentRunView run={run} agent={agents.find((agent) => agent.id === run.agentId)} onControl={onControl} onReply={onReply ? (text) => onReply(turn.id, run.finalMessageId || `message-${run.id}`, text) : undefined}/>
+      </RenderErrorBoundary>)}
     </section>)}
   </div>;
 }

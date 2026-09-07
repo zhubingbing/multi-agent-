@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEven
 type Mention = { id: string; label: string; description?: string; online?: boolean };
 type QueueItem = { id: string; kind: "steer" | "follow_up"; text: string };
 
-export function ChatComposer({ draftKey, mentions, selectedLabel, modelLabel, streaming, connected, initialValue = "", reply, onCancelReply, onSend, onAbort, onControl }: {
+export function ChatComposer({ draftKey, mentions, selectedLabel, modelLabel, streaming, connected, initialValue = "", reply, onCancelReply, onSend, onAbort, onControl, onAgentSettings, onModelSettings }: {
   draftKey: string;
   mentions: Mention[];
   selectedLabel: string;
@@ -16,11 +16,16 @@ export function ChatComposer({ draftKey, mentions, selectedLabel, modelLabel, st
   onSend: (message: string) => void;
   onAbort: () => void;
   onControl: (type: "steer" | "follow_up", message: string) => void;
+  onAgentSettings?: () => void;
+  onModelSettings?: () => void;
 }) {
   const storageKey = `workbench-chat-draft:${draftKey}`;
   const [value, setValue] = useState(() => localStorage.getItem(storageKey) ?? initialValue);
   const [behavior, setBehavior] = useState<"steer" | "follow_up">("steer");
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [history, setHistory] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("workbench-chat-history") || "[]") as string[]; } catch { return []; } });
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [beforeHistory, setBeforeHistory] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { setValue(localStorage.getItem(storageKey) ?? initialValue); setQueue([]); }, [storageKey]);
   useEffect(() => { if (initialValue) { setValue(initialValue); textareaRef.current?.focus(); } }, [initialValue]);
@@ -48,10 +53,33 @@ export function ChatComposer({ draftKey, mentions, selectedLabel, modelLabel, st
       onControl(behavior, message);
       setQueue((current) => [...current, { id: crypto.randomUUID(), kind: behavior, text: message }]);
     } else onSend(message);
+    setHistory((current) => {
+      const next = [...current.filter((item) => item !== message), message].slice(-50);
+      localStorage.setItem("workbench-chat-history", JSON.stringify(next));
+      return next;
+    });
+    setHistoryIndex(-1); setBeforeHistory("");
     setValue("");
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing) return;
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey && history.length) {
+      if (event.key === "ArrowUp" && (historyIndex >= 0 || !value || event.currentTarget.selectionStart === 0)) {
+        event.preventDefault();
+        const nextIndex = historyIndex < 0 ? history.length - 1 : Math.max(0, historyIndex - 1);
+        if (historyIndex < 0) setBeforeHistory(value);
+        setHistoryIndex(nextIndex); setValue(history[nextIndex]);
+        requestAnimationFrame(() => event.currentTarget.setSelectionRange(history[nextIndex].length, history[nextIndex].length));
+        return;
+      }
+      if (event.key === "ArrowDown" && historyIndex >= 0) {
+        event.preventDefault();
+        const nextIndex = historyIndex + 1;
+        if (nextIndex >= history.length) { setHistoryIndex(-1); setValue(beforeHistory); }
+        else { setHistoryIndex(nextIndex); setValue(history[nextIndex]); }
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); }
   };
 
@@ -62,7 +90,7 @@ export function ChatComposer({ draftKey, mentions, selectedLabel, modelLabel, st
       {matches.length > 0 && <div className="mention-menu">{matches.map((mention) => <button type="button" key={mention.id} onMouseDown={(event) => { event.preventDefault(); insertMention(mention); }}><b>@{mention.label}</b><small>{mention.description || mention.id}</small></button>)}</div>}
       <textarea ref={textareaRef} value={value} onChange={(event) => setValue(event.target.value)} placeholder={streaming ? behavior === "steer" ? "输入调整内容，立即改变执行方向…" : "输入后续要求，当前任务完成后执行…" : "提个问题，我来查找和分析…"} onKeyDown={keyDown}/>
       <div className="composer-toolbar">
-        {streaming ? <div className="stream-actions"><button type="button" className={behavior === "steer" ? "active" : ""} onClick={() => setBehavior("steer")}>立即调整</button><button type="button" className={behavior === "follow_up" ? "active" : ""} onClick={() => setBehavior("follow_up")}>完成后继续</button></div> : <><span>{selectedLabel}⌄</span><span>{modelLabel}⌄</span><span>按需确认⌄</span></>}
+        {streaming ? <div className="stream-actions"><button type="button" className={behavior === "steer" ? "active" : ""} onClick={() => setBehavior("steer")}>立即调整</button><button type="button" className={behavior === "follow_up" ? "active" : ""} onClick={() => setBehavior("follow_up")}>完成后继续</button></div> : <div className="composer-options"><button type="button" onClick={onAgentSettings}>{selectedLabel}⌄</button><button type="button" className="model" onClick={onModelSettings}>{modelLabel}⌄</button><button type="button">按需确认⌄</button></div>}
         {streaming && <button className="stop-generation" type="button" onClick={onAbort} title="停止生成">■</button>}
         <button className="send-message" disabled={!value.trim() || !connected} title={streaming ? behavior === "steer" ? "发送调整" : "加入后续队列" : "发送"}>➤</button>
       </div>

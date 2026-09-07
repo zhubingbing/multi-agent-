@@ -4,6 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/control ./cmd/control
+COPY internal/automation ./internal/automation
 RUN GOMAXPROCS=2 CGO_ENABLED=0 go build -p 1 -trimpath -o /out/multi-agent-control ./cmd/control
 
 FROM golang:1.23-bookworm
