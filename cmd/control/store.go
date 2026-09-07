@@ -46,16 +46,16 @@ type ConversationBinding struct {
 }
 
 type RuntimeNode struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	Status        string          `json:"status"`
-	ControlState  string          `json:"controlState"`
-	InstanceID    string          `json:"instanceId,omitempty"`
-	Version       string          `json:"version,omitempty"`
-	NodeVersion   string          `json:"nodeVersion,omitempty"`
-	PiVersion     string          `json:"piVersion,omitempty"`
-	OS            string          `json:"os,omitempty"`
-	Architecture  string          `json:"architecture,omitempty"`
+	ID             string             `json:"id"`
+	Name           string             `json:"name"`
+	Status         string             `json:"status"`
+	ControlState   string             `json:"controlState"`
+	InstanceID     string             `json:"instanceId,omitempty"`
+	Version        string             `json:"version,omitempty"`
+	NodeVersion    string             `json:"nodeVersion,omitempty"`
+	PiVersion      string             `json:"piVersion,omitempty"`
+	OS             string             `json:"os,omitempty"`
+	Architecture   string             `json:"architecture,omitempty"`
 	Capabilities   json.RawMessage    `json:"capabilities"`
 	Models         []runtimeModelInfo `json:"-"`
 	Skills         []runtimeSkillInfo `json:"-"`
@@ -64,8 +64,8 @@ type RuntimeNode struct {
 	MCPSupported   bool               `json:"mcpSupported"`
 	InventoryError string             `json:"inventoryError,omitempty"`
 	InventoryAt    int64              `json:"inventoryAt,omitempty"`
-	LastSeenAt    int64           `json:"lastSeenAt"`
-	ConfigVersion int64           `json:"configVersion"`
+	LastSeenAt     int64              `json:"lastSeenAt"`
+	ConfigVersion  int64              `json:"configVersion"`
 }
 
 type AgentConfigPatch struct {
@@ -458,20 +458,30 @@ func (s *Store) ensureRuntimeNodeColumns(ctx context.Context) error {
 		"mcp_supported": "INTEGER NOT NULL DEFAULT 0", "inventory_error": "TEXT NOT NULL DEFAULT ''", "inventory_at": "INTEGER NOT NULL DEFAULT 0",
 	}
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(runtime_nodes)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer rows.Close()
 	found := map[string]bool{}
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
 		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil { return err }
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
 		found[name] = true
 	}
-	if err := rows.Err(); err != nil { return err }
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for name, definition := range columns {
-		if found[name] { continue }
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runtime_nodes ADD COLUMN `+name+` `+definition); err != nil { return fmt.Errorf("add runtime node %s: %w", name, err) }
+		if found[name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runtime_nodes ADD COLUMN `+name+` `+definition); err != nil {
+			return fmt.Errorf("add runtime node %s: %w", name, err)
+		}
 	}
 	return nil
 }

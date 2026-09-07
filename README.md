@@ -101,6 +101,7 @@ The next production step is authenticated pairing, durable runtime/agent configu
 
 ## Design documents
 
+- [`docs/workbench-ui-guidelines.md`](docs/workbench-ui-guidelines.md) — Workbench 企业中后台字体、字号、行高、表单和列表详情一致性规范。
 - [`docs/runtime-node-digital-employee-plan.md`](docs/runtime-node-digital-employee-plan.md) — 参考 Multica 的 Runtime Node 管理、能力清单、数字员工动态绑定和消息协作分阶段实施计划。
 - [`docs/digital-employee-design.md`](docs/digital-employee-design.md) — 数字员工的持久身份、Owner/Workspace/Runtime、Skills/Tools、Presence、私聊/群聊和有界员工间协作设计。
 - [`docs/automation-development-plan.md`](docs/automation-development-plan.md) — Automation 后台调度、统一派发、数据模型、恢复治理、Workbench UI 和分阶段验收计划。

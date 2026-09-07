@@ -13,6 +13,7 @@ import "./workbench/agents/agent-center.css";
 import "./workbench/automation/automation.css";
 import "./workbench/models/model-config.css";
 import "./workbench/runtime/runtime-center.css";
+import "./workbench-theme.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
